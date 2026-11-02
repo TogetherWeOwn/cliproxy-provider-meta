@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"runtime"
 	"sort"
 	"strings"
@@ -180,8 +181,20 @@ func (e *metaExecutor) Execute(ctx context.Context, req pluginapi.ExecutorReques
 			return pluginapi.ExecutorResponse{}, wrapMetaUpstreamError(resp.StatusCode, resp.Body)
 		}
 		e.observeSubscriptionUsage(ctx, req, resp.Body)
-		completed, ok := translateMetaCompleted(ctx, prepared, req, resp.Body)
-		if !ok {
+		completed, errEvent := translateMetaCompleted(ctx, prepared, req, resp.Body)
+		if completed == nil {
+			if errEvent != nil {
+				// A not-issued rejection arriving as a buffered stream error
+				// still earns the once-only retry without reasoning; any other
+				// upstream error surfaces with its event instead of a generic
+				// disconnect.
+				status := metaStreamEventStatus(errEvent)
+				if next, ok := prepared.retryWithoutReplay(status, metaStreamEventMessage(errEvent)); ok {
+					prepared = next
+					continue
+				}
+				return pluginapi.ExecutorResponse{}, wrapMetaUpstreamError(status, errEvent)
+			}
 			return pluginapi.ExecutorResponse{}, providerkit.MapError(fmt.Errorf("meta-muse executor: stream disconnected before response.completed"))
 		}
 		if isMetaReasoningNotIssuedFailure(completed) {
@@ -226,9 +239,18 @@ func (e *metaExecutor) ExecuteStream(ctx context.Context, req pluginapi.Executor
 		}
 		if stream.StatusCode < 200 || stream.StatusCode >= 300 {
 			var body []byte
-			for chunk := range stream.Chunks {
-				if len(chunk.Payload) > 0 {
-					body = append(body, chunk.Payload...)
+		collectErrBody:
+			for {
+				select {
+				case <-ctx.Done():
+					return pluginapi.ExecutorStreamResponse{}, providerkit.MapError(ctx.Err())
+				case chunk, ok := <-stream.Chunks:
+					if !ok {
+						break collectErrBody
+					}
+					if len(chunk.Payload) > 0 {
+						body = append(body, chunk.Payload...)
+					}
 				}
 			}
 			if next, ok := prepared.retryWithoutReplay(stream.StatusCode, body); ok {
@@ -239,10 +261,14 @@ func (e *metaExecutor) ExecuteStream(ctx context.Context, req pluginapi.Executor
 		}
 		peeked, retry, fatal := peekMetaStreamBootstrap(ctx, stream.Chunks)
 		if fatal != nil {
+			discardMetaStream(ctx, stream.Chunks)
 			return pluginapi.ExecutorStreamResponse{}, fatal
 		}
 		if retry {
 			if next, ok := prepared.retryWithoutReplay(400, []byte(metaReasoningNotIssuedMessage)); ok {
+				// The rewound channel has a drain goroutine attached; consume
+				// and drop it so the drain finishes and releases upstream.
+				discardMetaStream(ctx, peeked)
 				prepared = next
 				continue
 			}
@@ -292,6 +318,78 @@ func pumpMetaStream(ctx context.Context, e *metaExecutor, req pluginapi.Executor
 		pendingEventLine = nil
 		return emit(line)
 	}
+	// process handles one complete SSE line; false stops the pump.
+	process := func(line []byte) bool {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("event:")) {
+			eventName := bytes.TrimSpace(trimmed[len("event:"):])
+			if string(eventName) == metaSubscriptionUsageEventType {
+				if !flushPending() {
+					return false
+				}
+				filteringSubscriptionUsage = true
+				return true
+			}
+			filteringSubscriptionUsage = false
+			if !flushPending() {
+				return false
+			}
+			pendingEventLine = bytes.Clone(line)
+			return true
+		}
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			if len(trimmed) == 0 {
+				filteringSubscriptionUsage = false
+			} else if filteringSubscriptionUsage {
+				return true
+			}
+			if !flushPending() {
+				return false
+			}
+			return emit(bytes.Clone(line))
+		}
+		eventData := bytes.TrimSpace(trimmed[len("data:"):])
+		eventType := gjson.GetBytes(eventData, "type").String()
+		if isMetaSubscriptionUsageEvent(eventType, eventData) {
+			e.observeSubscriptionUsageEvent(ctx, req, eventData)
+			pendingEventLine = nil
+			filteringSubscriptionUsage = false
+			return true
+		}
+		if filteringSubscriptionUsage {
+			if eventType == "" {
+				pendingEventLine = nil
+				if gjson.ValidBytes(eventData) {
+					filteringSubscriptionUsage = false
+				}
+				return true
+			}
+			filteringSubscriptionUsage = false
+		}
+		if streamEventErr := metaStreamEventError(eventData); streamEventErr != nil {
+			select {
+			case out <- pluginapi.ExecutorStreamChunk{Err: streamEventErr}:
+			case <-ctx.Done():
+			}
+			return false
+		}
+		eventData = prepared.replay.tagResponseEvent(eventData)
+		switch eventType {
+		case "response.output_item.done":
+			collectMetaOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+		case "response.completed", "response.incomplete":
+			eventData = patchMetaCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+		}
+		if !flushPending() {
+			return false
+		}
+		return emit(append([]byte("data: "), eventData...))
+	}
+	// The host bridge delivers fixed-size reads with no line alignment, so a
+	// data: line can split across chunks. Splitting each chunk independently
+	// would translate the fragment as truncated JSON; instead the trailing
+	// partial line is carried into the next chunk.
+	var carry []byte
 	for chunk := range in {
 		if chunk.Err != nil {
 			select {
@@ -300,77 +398,29 @@ func pumpMetaStream(ctx context.Context, e *metaExecutor, req pluginapi.Executor
 			}
 			return
 		}
-		for _, line := range bytes.Split(chunk.Payload, []byte("\n")) {
-			trimmed := bytes.TrimSpace(line)
-			if bytes.HasPrefix(trimmed, []byte("event:")) {
-				eventName := bytes.TrimSpace(trimmed[len("event:"):])
-				if string(eventName) == metaSubscriptionUsageEventType {
-					if !flushPending() {
-						return
-					}
-					filteringSubscriptionUsage = true
-					continue
-				}
-				filteringSubscriptionUsage = false
-				if !flushPending() {
-					return
-				}
-				pendingEventLine = bytes.Clone(line)
-				continue
-			}
-			if !bytes.HasPrefix(trimmed, []byte("data:")) {
-				if len(trimmed) == 0 {
-					filteringSubscriptionUsage = false
-				} else if filteringSubscriptionUsage {
-					continue
-				}
-				if !flushPending() {
-					return
-				}
-				if !emit(bytes.Clone(line)) {
-					return
-				}
-				continue
-			}
-			eventData := bytes.TrimSpace(trimmed[len("data:"):])
-			eventType := gjson.GetBytes(eventData, "type").String()
-			if isMetaSubscriptionUsageEvent(eventType, eventData) {
-				e.observeSubscriptionUsageEvent(ctx, req, eventData)
-				pendingEventLine = nil
-				filteringSubscriptionUsage = false
-				continue
-			}
-			if filteringSubscriptionUsage {
-				if eventType == "" {
-					pendingEventLine = nil
-					if gjson.ValidBytes(eventData) {
-						filteringSubscriptionUsage = false
-					}
-					continue
-				}
-				filteringSubscriptionUsage = false
-			}
-			if streamEventErr := metaStreamEventError(eventData); streamEventErr != nil {
-				select {
-				case out <- pluginapi.ExecutorStreamChunk{Err: streamEventErr}:
-				case <-ctx.Done():
-				}
-				return
-			}
-			eventData = prepared.replay.tagResponseEvent(eventData)
-			switch eventType {
-			case "response.output_item.done":
-				collectMetaOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-			case "response.completed", "response.incomplete":
-				eventData = patchMetaCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			}
-			if !flushPending() {
-				return
-			}
-			if !emit(append([]byte("data: "), eventData...)) {
-				return
+		payload := chunk.Payload
+		if len(carry) > 0 {
+			payload = append(carry, payload...)
+			carry = nil
+		}
+		lines := bytes.Split(payload, []byte("\n"))
+		if len(payload) == 0 || payload[len(payload)-1] != '\n' {
+			carry = lines[len(lines)-1]
+			lines = lines[:len(lines)-1]
+		}
+		stopped := false
+		for _, line := range lines {
+			if !process(line) {
+				stopped = true
+				break
 			}
 		}
+		if stopped {
+			return
+		}
+	}
+	if len(bytes.TrimSpace(carry)) > 0 {
+		process(carry)
 	}
 	flushPending()
 }
@@ -425,7 +475,7 @@ func peekMetaStreamBootstrap(ctx context.Context, in <-chan pluginapi.HTTPStream
 					for _, c := range peeked {
 						rewound <- c
 					}
-					go drainToChannel(in, rewound)
+					go drainToChannel(ctx, in, rewound)
 					return rewound, retry, nil
 				}
 			}
@@ -434,27 +484,67 @@ func peekMetaStreamBootstrap(ctx context.Context, in <-chan pluginapi.HTTPStream
 				for _, c := range peeked {
 					rewound <- c
 				}
-				go drainToChannel(in, rewound)
+				go drainToChannel(ctx, in, rewound)
 				return rewound, false, nil
 			}
 		}
 	}
 }
 
-func drainToChannel(in <-chan pluginapi.HTTPStreamChunk, out chan<- pluginapi.HTTPStreamChunk) {
+// drainToChannel forwards the rest of an upstream stream after a peek so the
+// pump sees every byte. It is context-cancellable: on client disconnect it
+// stops and closes out so both the drain and the pump terminate instead of
+// blocking forever on a channel nobody reads.
+func drainToChannel(ctx context.Context, in <-chan pluginapi.HTTPStreamChunk, out chan<- pluginapi.HTTPStreamChunk) {
 	defer close(out)
-	for chunk := range in {
-		out <- chunk
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case chunk, ok := <-in:
+			if !ok {
+				return
+			}
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
 	}
+}
+
+// discardMetaStream consumes and drops a stream nobody else reads (an abandoned
+// peek-rewound channel on the one-shot retry path, or a failed upstream on the
+// fatal path) so the goroutine feeding it can finish and release the upstream
+// connection.
+func discardMetaStream(ctx context.Context, in <-chan pluginapi.HTTPStreamChunk) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-in:
+				if !ok {
+					return
+				}
+			}
+		}
+	}()
 }
 
 // translateMetaCompleted collects buffered SSE (non-streaming POST returns an
 // event stream) into the terminal completed event, filtering subscription
-// usage and tagging egress envelopes.
-func translateMetaCompleted(_ context.Context, prepared *preparedMetaRequest, _ pluginapi.ExecutorRequest, data []byte) ([]byte, bool) {
+// usage and tagging egress envelopes. On success it returns the terminal
+// event. On failure it returns nil plus the first raw stream error event when
+// the buffer holds one (nil otherwise, i.e. a bare disconnect), so the caller
+// can run the not-issued retry or surface the upstream failure instead of a
+// generic disconnect. The error event is raw JSON: kit MapError sanitizes
+// mapped errors to "plugin operation failed", which would destroy the message
+// the retry decision matches on, so mapping happens at the caller's boundary.
+func translateMetaCompleted(_ context.Context, prepared *preparedMetaRequest, _ pluginapi.ExecutorRequest, data []byte) (completed, firstErrEvent []byte) {
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
-	var completed []byte
 	var filteringSubscriptionUsage bool
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
@@ -486,6 +576,9 @@ func translateMetaCompleted(_ context.Context, prepared *preparedMetaRequest, _ 
 			filteringSubscriptionUsage = false
 		}
 		if streamEventErr := metaStreamEventError(eventData); streamEventErr != nil {
+			if firstErrEvent == nil {
+				firstErrEvent = bytes.Clone(eventData)
+			}
 			continue
 		}
 		eventData = prepared.replay.tagResponseEvent(eventData)
@@ -498,14 +591,14 @@ func translateMetaCompleted(_ context.Context, prepared *preparedMetaRequest, _ 
 		}
 	}
 	if completed != nil {
-		return completed, true
+		return completed, firstErrEvent
 	}
-	if completed, ok := metaAsCompletedEvent(data); ok {
-		completed = prepared.replay.tagResponseEvent(completed)
-		completed = patchMetaCompletedOutput(completed, outputItemsByIndex, outputItemsFallback)
-		return completed, true
+	if wrapped, ok := metaAsCompletedEvent(data); ok {
+		wrapped = prepared.replay.tagResponseEvent(wrapped)
+		wrapped = patchMetaCompletedOutput(wrapped, outputItemsByIndex, outputItemsFallback)
+		return wrapped, firstErrEvent
 	}
-	return nil, false
+	return nil, firstErrEvent
 }
 
 // CountTokens counts Codex input tokens for the prepared body and translates
@@ -528,21 +621,41 @@ func (e *metaExecutor) CountTokens(ctx context.Context, req pluginapi.ExecutorRe
 	return pluginapi.ExecutorResponse{Payload: translated}, nil
 }
 
+// metaAllowedHTTPHost reports whether an upstream host may receive Meta
+// credentials: the credential's own base-URL host or the hardcoded Meta
+// auth/mint hosts. Anything else is rejected before any token is attached.
+func metaAllowedHTTPHost(host, baseURL string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	if u, err := url.Parse(strings.TrimSpace(baseURL)); err == nil {
+		if strings.EqualFold(strings.TrimSpace(u.Hostname()), host) {
+			return true
+		}
+	}
+	return host == "api.meta.ai" || host == "auth.meta.com"
+}
+
 // HttpRequest injects Meta credentials and executes one raw upstream request
-// through the host client.
+// through the host client. The target URL is gated to Meta hosts first so the
+// credential's bearer token can never be sent to an arbitrary URL.
 func (e *metaExecutor) HttpRequest(ctx context.Context, req pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
 	baseURL, token := metaCreds(req.StorageJSON, req.Metadata, req.Attributes)
 	if baseURL == "" {
 		baseURL = metaDefaultAPIBaseURL
 	}
-	headers := http.Header{}
-	for k, v := range req.Headers {
-		headers[k] = v
+	target, err := url.Parse(strings.TrimSpace(req.URL))
+	if err != nil || !strings.EqualFold(strings.TrimSpace(target.Scheme), "https") ||
+		!metaAllowedHTTPHost(target.Hostname(), baseURL) {
+		return pluginapi.ExecutorHTTPResponse{}, providerkit.MapError(fmt.Errorf("meta-muse executor: refusing upstream request to non-Meta host"))
 	}
+	headers := http.Header{}
 	headers.Set("Content-Type", "application/json")
 	if token != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
+	mergeMetaClientHeaders(headers, req.Headers)
 	applyMetaClientIdentity(headers)
 	resp, err := req.HTTPClient.Do(ctx, pluginapi.HTTPRequest{
 		Method:  req.Method,
@@ -601,6 +714,38 @@ func (e *metaExecutor) observeSubscriptionUsageEvent(_ context.Context, req plug
 	e.quota.observe(req.AuthID, headers)
 }
 
+// metaProtectedClientHeader reports whether a client-supplied header must never
+// reach upstream: every header the executor sets itself (auth, framing,
+// client identity). Matching is case-insensitive so a differently-cased
+// duplicate (e.g. lowercase "authorization" or "x-tbh-session-id") cannot slip
+// past our canonical entries and defeat per-request session isolation.
+func metaProtectedClientHeader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
+	case "authorization", "content-type", "accept", "cache-control", "user-agent", "x-client-id":
+		return true
+	}
+	return strings.HasPrefix(lower, "x-tbh-") ||
+		strings.HasPrefix(lower, "x-meta-") ||
+		strings.HasPrefix(lower, "x-muse-")
+}
+
+// mergeMetaClientHeaders copies client headers the executor did not set itself.
+// Protected identity/framing headers are dropped case-insensitively; anything
+// else we already set keeps our value.
+func mergeMetaClientHeaders(dst, src http.Header) {
+	for k, v := range src {
+		if metaProtectedClientHeader(k) {
+			continue
+		}
+		ck := http.CanonicalHeaderKey(k)
+		if dst.Get(ck) != "" {
+			continue
+		}
+		dst[ck] = v
+	}
+}
+
 // metaUpstreamHeaders builds the Muse Code identity headers for one upstream call.
 func metaUpstreamHeaders(token string, stream bool, clientHeaders http.Header) http.Header {
 	headers := http.Header{}
@@ -608,22 +753,14 @@ func metaUpstreamHeaders(token string, stream bool, clientHeaders http.Header) h
 	if strings.TrimSpace(token) != "" {
 		headers.Set("Authorization", "Bearer "+token)
 	}
-	applyMetaClientIdentity(headers)
 	if stream {
 		headers.Set("Accept", "text/event-stream")
 		headers.Set("Cache-Control", "no-cache")
 	} else {
 		headers.Set("Accept", "application/json")
 	}
-	for k, v := range clientHeaders {
-		lower := strings.ToLower(k)
-		if strings.HasPrefix(lower, "x-meta-") || strings.HasPrefix(lower, "x-muse-") {
-			continue
-		}
-		if _, exists := headers[k]; !exists {
-			headers[k] = v
-		}
-	}
+	mergeMetaClientHeaders(headers, clientHeaders)
+	applyMetaClientIdentity(headers)
 	return headers
 }
 
@@ -834,11 +971,25 @@ func metaStreamEventError(eventData []byte) error {
 	if eventType != "error" && eventType != "response.failed" {
 		return nil
 	}
-	statusCode := http.StatusBadGateway
+	return wrapMetaUpstreamError(metaStreamEventStatus(eventData), eventData)
+}
+
+// metaStreamEventStatus extracts the HTTP status a stream error event names,
+// defaulting to 502 when it names none.
+func metaStreamEventStatus(eventData []byte) int {
 	if code := int(gjson.GetBytes(eventData, "error.code").Int()); code >= 400 && code <= 599 {
-		statusCode = code
+		return code
 	}
-	return wrapMetaUpstreamError(statusCode, eventData)
+	return http.StatusBadGateway
+}
+
+// metaStreamEventMessage extracts the message a stream error event carries for
+// retry matching, falling back to the raw event when it carries none.
+func metaStreamEventMessage(eventData []byte) []byte {
+	if msg := gjson.GetBytes(eventData, "error.message").String(); msg != "" {
+		return []byte(msg)
+	}
+	return eventData
 }
 
 func wrapMetaUpstreamError(statusCode int, body []byte) error {

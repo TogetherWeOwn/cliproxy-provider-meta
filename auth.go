@@ -59,11 +59,16 @@ func metaStoredFields(storage []byte, metadata map[string]any) (map[string]any, 
 
 // metaCreds resolves baseURL and usable API token with native precedence:
 // attributes, then metadata, then storage; DCA tokens never count as API keys.
+// An explicitly configured attribute base_url always wins, even when it equals
+// the default: attribute presence (not value comparison) gates the storage
+// fallback so an operator-deselected endpoint cannot be reintroduced.
 func metaCreds(storage []byte, metadata map[string]any, attributes map[string]string) (baseURL, token string) {
 	baseURL = metaDefaultAPIBaseURL
+	attrBaseURLSet := false
 	if attributes != nil {
 		if b := strings.TrimSpace(attributes["base_url"]); b != "" {
 			baseURL = b
+			attrBaseURLSet = true
 		}
 		if k := strings.TrimSpace(attributes["api_key"]); k != "" && !strings.HasPrefix(k, "dca:") {
 			token = k
@@ -73,7 +78,7 @@ func metaCreds(storage []byte, metadata map[string]any, attributes map[string]st
 	}
 	fields, err := metaStoredFields(storage, metadata)
 	if err == nil {
-		if baseURL == metaDefaultAPIBaseURL {
+		if !attrBaseURLSet {
 			if b, _ := fields["base_url"].(string); strings.TrimSpace(b) != "" {
 				baseURL = strings.TrimSpace(b)
 			} else if b, _ := fields["api_base_url"].(string); strings.TrimSpace(b) != "" {
@@ -216,9 +221,10 @@ func decodeMetaLoginState(state string) (metaLoginState, error) {
 	if s.DeviceCode == "" {
 		return s, fmt.Errorf("invalid login state")
 	}
-	if s.TokenEndpoint == "" {
-		s.TokenEndpoint = metaTokenEndpoint
-	}
+	// The state round-trips through the caller unsigned, so a tampered
+	// token_endpoint must never be honored: polling always uses the hardcoded
+	// Meta endpoint. Overwrite here and use the constant at the poll site.
+	s.TokenEndpoint = metaTokenEndpoint
 	return s, nil
 }
 
@@ -260,13 +266,17 @@ func (p *metaAuthProvider) StartLogin(ctx context.Context, req pluginapi.AuthLog
 	if display == "" {
 		display = dcr.VerificationURI
 	}
+	var expiresAt int64
+	if dcr.ExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(dcr.ExpiresIn) * time.Second).Unix()
+	}
 	state := metaLoginState{
 		DeviceCode:          dcr.DeviceCode,
 		VerificationURI:     dcr.VerificationURIComplete,
 		VerificationDisplay: display,
 		TokenEndpoint:       metaTokenEndpoint,
 		IntervalSeconds:     interval,
-		ExpiresAtUnix:       time.Now().Add(time.Duration(dcr.ExpiresIn) * time.Second).Unix(),
+		ExpiresAtUnix:       expiresAt,
 	}
 	return pluginapi.AuthLoginStartResponse{
 		Provider:  metaMuseNamespace,
@@ -283,6 +293,9 @@ func (p *metaAuthProvider) PollLogin(ctx context.Context, req pluginapi.AuthLogi
 	if err != nil {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "login expired; restart login"}, nil
 	}
+	if state.ExpiresAtUnix != 0 && time.Now().Unix() > state.ExpiresAtUnix {
+		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "device code expired; restart login"}, nil
+	}
 	if req.HTTPClient == nil {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "login requires host HTTP client"}, nil
 	}
@@ -291,9 +304,11 @@ func (p *metaAuthProvider) PollLogin(ctx context.Context, req pluginapi.AuthLogi
 		"device_code": {state.DeviceCode},
 		"client_id":   {metaOAuthClientID},
 	}
+	// Always the hardcoded endpoint: the decoded state is unsigned and its
+	// token_endpoint field is untrusted (see decodeMetaLoginState).
 	resp, err := req.HTTPClient.Do(ctx, pluginapi.HTTPRequest{
 		Method: http.MethodPost,
-		URL:    state.TokenEndpoint,
+		URL:    metaTokenEndpoint,
 		Headers: http.Header{
 			"Content-Type": {"application/x-www-form-urlencoded"},
 			"Accept":       {"application/json"},

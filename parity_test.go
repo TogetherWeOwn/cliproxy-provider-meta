@@ -405,9 +405,9 @@ func TestParitySubscriptionUsageFilteredAndObserved(t *testing.T) {
 	stream := []byte("data: {\"type\":\"response.created\"}\n\ndata: " + string(usageEvent) + "\n\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n")
 
 	prepared := &preparedMetaRequest{replay: parityReplay("auth-a", "")}
-	completed, ok := translateMetaCompleted(context.Background(), prepared, pluginapi.ExecutorRequest{}, stream)
-	if !ok || gjson.GetBytes(completed, "response").Exists() == false && gjson.GetBytes(completed, "type").String() != "response.completed" {
-		t.Fatalf("buffered completed not collected: %s", completed)
+	completed, errEvent := translateMetaCompleted(context.Background(), prepared, pluginapi.ExecutorRequest{}, stream)
+	if completed == nil || gjson.GetBytes(completed, "response").Exists() == false && gjson.GetBytes(completed, "type").String() != "response.completed" {
+		t.Fatalf("buffered completed not collected: %s errEvent=%s", completed, errEvent)
 	}
 	if strings.Contains(string(completed), "subscription_usage") {
 		t.Fatalf("usage event leaked into completed: %s", completed)
