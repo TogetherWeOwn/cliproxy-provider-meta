@@ -223,6 +223,37 @@ func TestQuotaProviderCache(t *testing.T) {
 	}
 }
 
+// The plugin-level DescribeQuota advertises both routed keys (legacy "meta"
+// polls keep working and taken-over "meta-muse" auths resolve to the same
+// cache), while the kit cache underneath keeps the single "meta" routing key.
+func TestQuotaProviderDualKey(t *testing.T) {
+	var polls int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		_, _ = w.Write([]byte(envelopeFixture()))
+	}))
+	defer s.Close()
+	client := providerkit.NewQuotaHTTPClient(nil)
+	defer client.CloseIdleConnections()
+	q := newQuotaProvider(client)
+	q.endpoint = s.URL + "/muse-code/key"
+
+	desc, err := q.DescribeQuota(context.Background(), pluginapi.QuotaDescribeRequest{})
+	if err != nil || len(desc.SupportedProviders) != 2 || desc.SupportedProviders[0] != providerID || desc.SupportedProviders[1] != metaMuseNamespace {
+		t.Fatalf("describe %+v %v", desc, err)
+	}
+	// FetchQuota normalizes the taken-over key to the cache key: one poll
+	// serves both provider spellings of the same auth.
+	metaReq := pluginapi.QuotaFetchRequest{AuthID: "a", Provider: "meta", StorageJSON: metaStorage(testDCAToken)}
+	museReq := pluginapi.QuotaFetchRequest{AuthID: "a", Provider: metaMuseNamespace, StorageJSON: metaStorage(testDCAToken)}
+	if _, err := q.FetchQuota(context.Background(), metaReq); err != nil || polls != 1 {
+		t.Fatalf("meta fetch polls=%d %v", polls, err)
+	}
+	if _, err := q.FetchQuota(context.Background(), museReq); err != nil || polls != 1 {
+		t.Fatalf("meta-muse fetch missed shared cache, polls=%d %v", polls, err)
+	}
+}
+
 // The 30-minute TTL value is asserted directly: expiry mechanics of
 // NewCachedQuotaWithTTL are covered by the kit's own clock-controlled tests,
 // so this guards the wiring (the constant the provider passes) without

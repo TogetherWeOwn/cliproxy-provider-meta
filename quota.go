@@ -65,7 +65,7 @@ func extractDCAToken(storage []byte, metadata map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if typ, _ := fields["type"].(string); typ != providerID {
+	if typ, _ := fields["type"].(string); !isMetaAuthType(typ) {
 		return "", fmt.Errorf("quota requires a Meta credential")
 	}
 	raw, _ := fields["dca_token"].(string)
