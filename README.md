@@ -57,8 +57,9 @@ from the card; a tier-only card means quota-blind, never fabricated.
   own base-URL host (plus the hardcoded Meta auth/mint hosts) before any
   bearer token is attached; client-supplied identity headers are dropped
   case-insensitively so per-request session isolation holds.
-- The DCA token is never logged, persisted or included in errors, and the
-  normalized card never contains the envelope key, email or name.
+- The DCA token is persisted as the credential storage of record (the quota
+  poll reads it back from storage) and is never logged or included in errors,
+  and the normalized card never contains the envelope key, email or name.
 
 ## Auth files
 
