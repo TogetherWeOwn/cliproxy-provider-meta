@@ -84,16 +84,24 @@ func TestRealHostLoader(t *testing.T) {
 	defer cancel()
 	ctx = logging.WithResponseHeadersHolder(ctx)
 	host.ApplyConfig(ctx, cfg)
-	// Quota-only v1: the plugin registers a quota provider for the core
-	// "meta" auths and no auth, model or executor capability.
+	// Full provider plugin v2: the plugin registers auth ownership (the
+	// "meta-muse" identifier plus the legacy "meta" key claimed through the
+	// credential-provider bridge), the patch-carrying executor, and the
+	// converging quota provider for the "meta" auths.
 	if !host.PluginLoaded("meta") || !host.PluginRegistered("meta") || !host.HasQuotaProvider("meta") {
 		t.Fatalf("registration %+v", host.RegisteredPlugins())
 	}
-	if host.HasAuthProvider("meta") || host.HasExecutorCandidateProvider("meta") {
-		t.Fatalf("quota-only plugin must not provide auth or execution: %+v", host.RegisteredPlugins())
+	if !host.HasAuthProvider("meta-muse") || !host.HasAuthProvider("meta") {
+		t.Fatalf("auth takeover missing: %+v", host.RegisteredPlugins())
+	}
+	if !host.SameAuthProvider("meta", "meta-muse") {
+		t.Fatalf("meta and meta-muse must bridge to one auth provider: %+v", host.RegisteredPlugins())
+	}
+	if !host.HasExecutorCandidateProvider("meta-muse") {
+		t.Fatalf("executor candidate missing: %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.1.0" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.0" {
 		t.Fatalf("metadata %+v", info)
 	}
 	storage, _ := json.Marshal(map[string]any{"type": "meta", "dca_token": "dca:hostcompat-token", "api_key": "hostcompat-key", "label": "Example"})
@@ -123,7 +131,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "meta" || reg.Plugins[0].Version != "0.1.0" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "meta" || reg.Plugins[0].Version != "0.2.0" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }

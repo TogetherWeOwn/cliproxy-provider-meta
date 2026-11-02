@@ -1,7 +1,7 @@
 package main
 
 // Behavior-parity tests for the four Meta CLIProxy fork patches this plugin
-// carries so they can be dropped from the fork (TWO-1432):
+// carries so they can be dropped from the fork:
 //
 //  1. 4a6fcb08 account-bound reasoning replay.
 //  2. 2c99035c per-session prompt_cache_key.
@@ -450,8 +450,10 @@ func TestParityAuthTakeover(t *testing.T) {
 	if auth.Identifier() != metaMuseNamespace {
 		t.Fatalf("identifier = %q, want meta-muse", auth.Identifier())
 	}
-	if ids := auth.Identifiers(); len(ids) != 2 || ids[0] != metaMuseNamespace || ids[1] != providerID {
-		t.Fatalf("identifiers = %v, want both keys", ids)
+	// Single auth identifier (the kit rejects MultiAuthProvider); the legacy
+	// key is claimed through the credential-provider bridge instead.
+	if creds := auth.CredentialProviders(); len(creds) != 1 || creds[0] != providerID {
+		t.Fatalf("credential providers = %v, want [meta]", creds)
 	}
 	for _, typ := range []string{providerID, metaMuseNamespace} {
 		resp, err := auth.ParseAuth(context.Background(), pluginapi.AuthParseRequest{RawJSON: []byte(`{"type":"` + typ + `","api_key":"k"}`)})

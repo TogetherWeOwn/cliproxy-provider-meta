@@ -19,10 +19,11 @@ import (
 // This file ports Meta auth ownership from stock CLIProxy
 // (internal/auth/meta/meta.go) into the plugin: ParseAuth first-crack claim of
 // both "meta" and "meta-muse" (legacy takeover without file renames),
-// credential-provider claim ["meta"] for SameAuthProvider bridging, credential
-// resolution with DCA/API-key precedence, device-code login via stock
-// StartLogin/PollLogin, DCA mint on refresh, and the readable credential
-// filename helper. Reversal is a persisted `type` string flip back to "meta".
+// single identifier "meta-muse" with credential-provider claim ["meta"] for
+// SameAuthProvider bridging, credential resolution with DCA/API-key
+// precedence, device-code login via stock StartLogin/PollLogin, DCA mint on
+// refresh, and the readable credential filename helper. Reversal is a
+// persisted `type` string flip back to "meta".
 
 const (
 	metaDefaultAPIBaseURL = "https://api.meta.ai/v1"
@@ -33,17 +34,19 @@ const (
 	metaOAuthClientID     = "1031625952748946"
 )
 
-// metaAuthProvider owns Meta credentials for both the legacy "meta" key and
-// this plugin's "meta-muse" key.
+// metaAuthProvider owns Meta credentials for the plugin's "meta-muse" key and
+// the legacy "meta" key it takes over.
 type metaAuthProvider struct {
 	quota *quotaProvider
 }
 
+// Identifier is the plugin's single auth identifier. The kit exposes one auth
+// identifier per plugin and rejects AuthProviders that implement
+// pluginapi.MultiAuthProvider, so the legacy "meta" key is claimed through
+// CredentialProviders below instead of a second identifier: the v8 host routes
+// ParseAuth/RefreshAuth for "meta" files to this plugin via
+// recordOwnsCredentialProvider and bridges the keys via SameAuthProvider.
 func (p *metaAuthProvider) Identifier() string { return metaMuseNamespace }
-
-// Identifiers implements pluginapi.MultiAuthProvider: the plugin parses both
-// its own key and the legacy core key it takes over.
-func (p *metaAuthProvider) Identifiers() []string { return []string{metaMuseNamespace, providerID} }
 
 // CredentialProviders implements the kit credential-provider source extension:
 // legacy "meta" auths route to this plugin for management and recovery.
