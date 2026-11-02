@@ -1,0 +1,226 @@
+name: PR lint
+
+# TogetherWeOwn GitHub standard, one-click template for new repos.
+# Always an error: Conventional Commits title, and a commit on the default branch that is not one.
+# PR_STANDARDS_MODE ("warn" or "error") sets the level for the rest: an empty body and the
+# two required PR template sections (Verification, and Linked Issues or Issue Description for
+# feat/fix/perf/refactor/security). Land it in "warn", clear the open PRs, then flip to "error".
+# Internal ids never belong in PR text, in public or private repos (CONTRIBUTING.md §2);
+# leave REQUIRE_CARD_REF "false". The org-required pr-standards check enforces the same rule
+# on every repo; this template repeats it so a repo's own pr-lint agrees.
+# INTERNAL_ID_PREFIXES lists the org's tracker prefixes (comma- or pipe-separated);
+# empty means a generic ticket-like pattern.
+# Forward control for public repos: the strict subset (tracker ids only when
+# INTERNAL_ID_PREFIXES is set above, instance UI links like /TOG/issues/ outside
+# github.com URLs, and the internal host) always fails the PR title/body check.
+# github.com scrub accepts an optional scheme and www and stops at delimiters so
+# glued refs are still scanned; UI-link matches any scheme-qualified host
+# (localhost, single-label, IP, IPv6) and dotted bare hosts with a boundary,
+# so code paths stay clean and long blobs stay fast.
+# STRICT_INTERNAL_LEVEL fail-closed: any value other than an explicit "warning"
+# (or "warn") downgrade fails. The tracker-id hit is skipped when REQUIRE_CARD_REF
+# is "true" (private repos expect a card id), and INTERNAL_ID_LEVEL=error still
+# fails a tracker id even when the strict level is downgraded (stricter wins,
+# advisory runs when the tracker id itself is not strict).
+# Otherwise advisory INTERNAL_ID_LEVEL behavior is unchanged.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+  # Merge queue validation: `pr-lint` is a required check, so it must
+  # report on merge_group. The queue run carries no PR title and an
+  # empty commits payload, so the run step passes vacuously (the title
+  # was already linted on the PR head).
+  merge_group:
+  push:
+    branches: [ $default-branch ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-lint-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REQUIRE_CARD_REF: "false"
+  INTERNAL_ID_LEVEL: "error" # "warning" downgrades; internal ids are banned in every repo
+  INTERNAL_ID_PREFIXES: "TWO,TOG,PAP,PAPA" # empty means a generic ticket-like pattern
+  STRICT_INTERNAL_LEVEL: "error" # fail-closed strict public-text gate; "warning" downgrades it
+  PR_STANDARDS_MODE: "warn"
+
+jobs:
+  pr-lint:
+    name: pr-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check title, body and commits
+        env:
+          EVENT: ${{ github.event_name }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          COMMITS: ${{ toJSON(github.event.commits) }}
+        run: |-
+          python3 - <<'PYEOF'
+          import json, os, re, sys
+
+          TYPES = "feat|fix|perf|refactor|test|docs|build|ci|chore|revert|style|security"
+          HEADER = re.compile(rf"^({TYPES})(\([A-Za-z0-9._/,-]+\))?!?: \S.*$")
+          def build_internal_id():
+              raw = (os.environ.get("INTERNAL_ID_PREFIXES") or "").strip()
+              if raw:
+                  parts = [p.strip() for p in re.split(r"[,\s|]+", raw) if p.strip()]
+                  if parts:
+                      return (re.compile(r"\b(" + "|".join(re.escape(p) for p in parts) + r")-\d+\b"),
+                              True)
+              return re.compile(r"\b[A-Z]{2,10}-\d+\b"), False
+          INTERNAL_ID, HAVE_PREFIXES = build_internal_id()
+          # Strict public-text subset: tracker ids only when prefixes are set (otherwise the
+          # generic pattern stays advisory), instance UI links and the internal host. These
+          # always fail a public title/body check unless the strict level is explicitly
+          # downgraded to a warning (fail-closed).
+          UI_LINK_BARE = re.compile(r"(?<![\w.-])/[A-Z]{2,6}/(issues|agents|projects|approvals|runs)/")
+          UI_LINK_HOST = re.compile(r"(?:https?://[^\s/<>()]+|(?<![\w./-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?)/[A-Z]{2,6}/(issues|agents|projects|approvals|runs)/")
+          HOST_INTERNAL = re.compile(r"\binfextion\.net\b", re.IGNORECASE)
+          GITHUB_URL = re.compile(r"(?:https?://|(?<![\w.-]))(?:www\.)?github\.com/[A-Za-z0-9_.~%/#?=&+\-]*", re.IGNORECASE)
+          STRICT_FIXED = [(UI_LINK_BARE, "an instance UI link"), (UI_LINK_HOST, "an instance UI link"), (HOST_INTERNAL, "the internal host")]
+          HELP = ("Expected a Conventional Commits header, e.g. 'fix(auth): refuse expired sudo "
+                  "sessions'. Allowed types: " + TYPES.replace("|", ", ") + ".")
+
+          LIGHT = {"docs", "chore", "build", "ci", "style", "test", "revert"}
+          # (heading, minimum real items, skipped for LIGHT types)
+          # Pipeline review 2026-10-10: only what a reviewer or gate needs. The other template
+          # sections (What Changed, Notes for reviewers) are optional context.
+          SECTIONS = [
+              ("Linked Issues or Issue Description", 1, True),
+              ("Verification", 1, False),
+          ]
+
+          def parse_sections(text):
+              out, cur, buf = {}, None, []
+              for line in text.splitlines():
+                  m = re.match(r"^##\s+(.+?)\s*#*\s*$", line)
+                  if m:
+                      if cur is not None:
+                          out[cur] = "\n".join(buf)
+                      cur, buf = m.group(1).strip().lower(), []
+                  elif cur is not None:
+                      buf.append(line)
+              if cur is not None:
+                  out[cur] = "\n".join(buf)
+              return out
+
+          def real_items(content):
+              n = 0
+              for raw in content.splitlines():
+                  line = re.sub(r"^\s*(?:>\s*)*(?:[-*]\s+|\d+[.)]\s+)?", "", raw).strip()
+                  if len(line) < 6 or re.fullmatch(r"\[[^\]]*\]", line) or line.endswith((" ...", " …")):
+                      continue
+                  n += 1
+              return n
+
+          def header_errors(text):
+              errs = []
+              if not HEADER.match(text):
+                  errs.append("not a Conventional Commits header")
+              if len(text) > 100:
+                  errs.append(f"{len(text)} chars (max 100)")
+              if text.rstrip().endswith("."):
+                  errs.append("ends with a period")
+              return errs
+
+          def internal_id_notes(text, where):
+              if INTERNAL_ID.search(text or ""):
+                  level = "error" if os.environ.get("INTERNAL_ID_LEVEL") == "error" else "warning"
+                  print(f"::{level} title=Internal id in {where}::" +
+                        "Keep internal ticket ids out of public PR text.")
+                  return level == "error"
+              return False
+
+          def strict_internal_hits(text):
+              """Fail-closed strict subset for public title/body. Labels only, never values."""
+              hits = []
+              require_card = os.environ.get("REQUIRE_CARD_REF") == "true"
+              if HAVE_PREFIXES and not require_card and INTERNAL_ID.search(text or ""):
+                  hits.append("a tracker id")
+              scrubbed = GITHUB_URL.sub("", text or "")
+              for pat, label in STRICT_FIXED:
+                  if pat.search(scrubbed) and label not in hits:
+                      hits.append(label)
+              return hits
+
+          def report_strict(hits, where):
+              raw = (os.environ.get("STRICT_INTERNAL_LEVEL") or "").strip().lower()
+              level = "warning" if raw in ("warning", "warn") else "error"
+              if "a tracker id" in hits and os.environ.get("INTERNAL_ID_LEVEL") == "error":
+                  level = "error"
+              print(f"::{level} title=Strict internal ref in {where}::The PR {where} holds " +
+                    f"{', '.join(hits)}. Public PR text carries no tracker ids, instance " +
+                    "links or internal hosts: say it in plain words and link only public " +
+                    "GitHub issues.")
+              return level == "error"
+
+          mode = os.environ.get("PR_STANDARDS_MODE", "warn")
+          strict = mode == "error"
+          failed = False
+          if os.environ.get("EVENT") == "pull_request":
+              title = (os.environ.get("TITLE") or "").strip()
+              body = os.environ.get("BODY") or ""
+              author = os.environ.get("AUTHOR") or ""
+              if author.endswith("[bot]") and author.startswith(("dependabot", "renovate")):
+                  if header_errors(title):
+                      print(f"::warning::{author} title '{title}' is not conventional.")
+                  sys.exit(0)
+              errs = header_errors(title)
+              if errs:
+                  failed = True
+                  print(f"::error title=PR title::'{title}': {'; '.join(errs)}. {HELP}")
+              text = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+              if len(re.sub(r"\s", "", text)) < 40:
+                  if strict:
+                      failed = True
+                      print("::error title=PR body::The description is empty. Say what changed, "
+                            "why, and how it was tested.")
+                  else:
+                      print("::warning title=PR body::The description looks empty.")
+              kind = re.match(rf"^({TYPES})", title)
+              light = bool(kind) and kind.group(1) in LIGHT
+              sections = parse_sections(text)
+              for name, minimum, skip_light in SECTIONS:
+                  if skip_light and light:
+                      continue
+                  if real_items(sections.get(name.lower(), "")) < minimum:
+                      if strict:
+                          failed = True
+                      print(f"::{'error' if strict else 'warning'} title=PR body::Section '## {name}' "
+                            f"is missing or has fewer than {minimum} real item(s). Follow the PR template.")
+              if os.environ.get("REQUIRE_CARD_REF") == "true" and not INTERNAL_ID.search(body):
+                  failed = True
+                  print("::error title=Card reference::Add 'Refs: <card-id>' to the PR body.")
+              for where, text in (("the title", title), ("the body", body)):
+                  text = re.sub(r"<!--.*?-->", "", text or "", flags=re.S)  # template comments
+                  hits = strict_internal_hits(text)
+                  if hits:
+                      if report_strict(hits, where):
+                          failed = True
+                      if "a tracker id" not in hits and internal_id_notes(text, where):
+                          failed = True
+                  elif internal_id_notes(text, where):
+                      failed = True
+          else:
+              for c in json.loads(os.environ.get("COMMITS") or "[]") or []:
+                  subject = (c.get("message") or "").splitlines()[0] if c.get("message") else ""
+                  if subject.startswith(("Merge ", "Revert \"")):
+                      continue
+                  errs = header_errors(subject)
+                  if errs:
+                      failed = True
+                      print(f"::error title=Commit on default branch::{c.get('id', '')[:10]} '{subject}': "
+                            f"{'; '.join(errs)}. Merge PRs with squash and the PR title as the "
+                            "commit title.")
+          if failed:
+              sys.exit(1)
+          print("PR conventions OK")
+          PYEOF

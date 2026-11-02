@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "meta",
+      "name": "Meta",
+      "description": "Read-only Meta subscription quota cards via key-envelope reads",
+      "author": "TogetherWeOwn",
+      "repository": "https://github.com/TogetherWeOwn/cliproxy-provider-meta",
+      "version": "0.1.0",
+      "license": "MIT",
+      "tags": ["provider", "meta", "quota"],
+      "install": {"type": "github-release"}
+    }
+  ]
+}

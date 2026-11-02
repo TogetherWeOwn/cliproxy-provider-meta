@@ -1,0 +1,66 @@
+# Advisory pull-request size labels (TogetherWeOwn standard; see
+# CI-STANDARD.md in TogetherWeOwn/.github, "Advisory PR-size labels").
+#
+# Thin caller: all logic lives once in the org `.github` repository
+# (`.github/workflows/pr-size.yml`, `.github/workflows/pr-size-weekly.yml`
+# and `.github/scripts/pr_size.py`) and runs from that repository at the
+# pinned ref - this repo keeps no copy of the script. To adopt: copy this
+# file to `.github/workflows/pr-size.yml`, repin both `uses:` refs to the
+# current TogetherWeOwn/.github `main` SHA, and set `exclude-extra` to this
+# repo's generated paths.
+#
+# ADVISORY ONLY: never make `pr-size` a required check and never add it to
+# a ruleset's required-workflows list. The labeller exits 0 on any API
+# failure, and fork pull requests (read-only token) warn and skip.
+#
+# The weekly tally's schedule lives here, in the caller, because the tally
+# is per-repository. It calls a SEPARATE reusable file so this job can stay
+# read-only: GitHub checks a reusable workflow's nested-job permissions
+# against the caller job's grant when parsing the workflow, ignoring `if:`,
+# so each caller job below grants only what the file it calls requests.
+
+name: pr-size
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '17 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Optional PR number to label now (blank runs the weekly tally)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pr-size:
+    name: pr-size
+    if: github.event_name == 'pull_request' || inputs.pr_number != ''
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: TogetherWeOwn/.github/.github/workflows/pr-size.yml@9ef0c1321f5ac1dd37a4cdae25b8de322f95650c
+    with:
+      pr-number: ${{ inputs.pr_number || '' }}
+      # This repo's generated paths, excluded on top of the script's
+      # built-in lockfile/generated/fixture list. Example:
+      # exclude-extra: "public/bundles/**,drizzle/meta/**"
+      exclude-extra: ""
+
+  pr-size-weekly:
+    name: pr-size-weekly
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.pr_number == '')
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    uses: TogetherWeOwn/.github/.github/workflows/pr-size-weekly.yml@9ef0c1321f5ac1dd37a4cdae25b8de322f95650c
