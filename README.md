@@ -30,6 +30,8 @@ and the tier — nothing else is retained:
 Successful polls are cached per auth for 30 minutes with single-flight
 fetching; errors are never cached. Windows without a usable signal drop
 from the card; a tier-only card means quota-blind, never fabricated.
+Accounts with no subscription (`is_subs_active:false`, no tier, no
+`subs_usage`) read as unknown — no windows, never fabricated headroom.
 
 ## Credential handling
 

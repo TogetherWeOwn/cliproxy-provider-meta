@@ -27,6 +27,12 @@ data, tokens or keys are recorded here — only public protocol facts.
   Meta executor surfaces as `X-Meta-*` response headers. This plugin reads
   it directly from the envelope instead, so it works on stock CLIProxy
   without any core patches.
+- Accounts without a subscription return no `subs_usage` and no tier
+  (`is_subs_active:false`, `require_payment:true` on the operator's
+  mint-test accounts): the provider reports unknown (no windows, an
+  uncached error) rather than fabricating headroom. Neither
+  `is_subs_active` nor `require_payment` is decoded — only the absence of
+  a usable window plus tier decides unknown.
 
 ## Later work
 

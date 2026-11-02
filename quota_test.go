@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -180,6 +181,60 @@ func TestFetchMetaQuota(t *testing.T) {
 	}
 	if _, err := fetchMetaQuota(context.Background(), client, s.URL+"/empty", testDCAToken, ""); err == nil {
 		t.Fatal("empty envelope accepted")
+	}
+}
+
+// Unsubscribed accounts carry no subscription signal: the envelope has no
+// subs_usage and no tier (operator mint test: is_subs_active=false,
+// require_payment=true on accounts without a subscription). The provider
+// must read those as unknown — no windows, never fabricated headroom — and
+// the unknown must stay uncached so a later subscription is picked up.
+func unsubscribedFixture() string {
+	return `{"api_key":"envelope-key","base_url":"https://api.meta.ai","user_email":"identity-address","full_name":"Identity Name","is_subs_active":false,"require_payment":true}`
+}
+
+func TestFetchMetaQuotaUnsubscribed(t *testing.T) {
+	var polls int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(unsubscribedFixture()))
+	}))
+	defer s.Close()
+	client := providerkit.NewQuotaHTTPClient(nil)
+	defer client.CloseIdleConnections()
+
+	// Normalize level: payment state never fabricates buckets.
+	var env metaKeyEnvelope
+	decoder := json.NewDecoder(bytes.NewReader([]byte(unsubscribedFixture())))
+	decoder.UseNumber()
+	if err := decoder.Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	if out := normalizeEnvelope(env, "envelope-key"); len(out.Groups) != 0 {
+		t.Fatalf("unsubscribed card fabricated buckets: %+v", out.Groups)
+	}
+
+	// Fetch level: unknown, surfaced as an error rather than a card.
+	_, err := fetchMetaQuota(context.Background(), client, s.URL, testDCAToken, "envelope-key")
+	if !errors.Is(err, errNoQuotaSignal) {
+		t.Fatalf("unsubscribed fetch = %v, want errNoQuotaSignal", err)
+	}
+	for _, secret := range []string{testDCAToken, "envelope-key", "identity-address", "Identity Name"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("unsubscribed error leaked %q", secret)
+		}
+	}
+
+	// Unknown is never cached: each poll reads the envelope again.
+	q := newQuotaProvider(client)
+	q.endpoint = s.URL
+	req := pluginapi.QuotaFetchRequest{AuthID: "unsub", Provider: "meta", StorageJSON: metaStorage(testDCAToken)}
+	if _, err := q.cache.FetchQuota(context.Background(), req); !errors.Is(err, errNoQuotaSignal) {
+		t.Fatalf("cached unsubscribed fetch = %v, want errNoQuotaSignal", err)
+	}
+	if _, err := q.cache.FetchQuota(context.Background(), req); !errors.Is(err, errNoQuotaSignal) || polls != 3 {
+		t.Fatalf("unsubscribed error cached, polls=%d err=%v", polls, err)
 	}
 }
 
