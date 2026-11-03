@@ -36,7 +36,8 @@ data, tokens or keys are recorded here — only public protocol facts.
 
 ## Later work
 
-- The executor that retires the carried Meta core patches will live in this
-  same plugin. It is a separate change with its own review; v1 is
-  quota-only on purpose so quota cards land without taking over the core
-  `meta` key.
+- v2 adds the executor that retires the carried Meta core patches in this
+  same plugin, with auth ownership (single `meta-muse` identifier; the core
+  `meta` key is taken over through the credential-provider bridge) and
+  namespaced models. v1 was quota-only on purpose so quota cards landed
+  without taking over the core `meta` key.

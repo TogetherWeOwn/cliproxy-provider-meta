@@ -4,12 +4,12 @@
     {
       "id": "meta",
       "name": "Meta",
-      "description": "Read-only Meta subscription quota cards via key-envelope reads",
+      "description": "Meta Muse provider: auth ownership with legacy meta takeover, namespaced models, patch-carrying executor, and subscription quota cards",
       "author": "TogetherWeOwn",
       "repository": "https://github.com/TogetherWeOwn/cliproxy-provider-meta",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "license": "MIT",
-      "tags": ["provider", "meta", "quota"],
+      "tags": ["provider", "meta", "quota", "executor"],
       "install": {"type": "github-release"}
     }
   ]

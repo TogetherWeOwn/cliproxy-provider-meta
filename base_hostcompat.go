@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -13,14 +14,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// pluginCfgHolder carries the latest plugin configuration subtree to the
+// executor, which reads it per request.
+var pluginCfgHolder atomic.Value
+
+func pluginConfigNow() pluginConfig {
+	cfg, _ := pluginCfgHolder.Load().(pluginConfig)
+	return cfg
+}
+
 var testEndpoint atomic.Value
 
 func configureBase(_ context.Context, raw []byte) error {
+	pluginCfgHolder.Store(parsePluginConfig(raw))
 	var cfg struct {
 		Endpoint string `yaml:"hostcompat_endpoint"`
 	}
-	if yaml.Unmarshal(raw, &cfg) != nil {
-		return errors.New("invalid test configuration")
+	if len(bytes.TrimSpace(raw)) != 0 {
+		_ = yaml.Unmarshal(raw, &cfg)
+	}
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		return nil
 	}
 	u, err := url.Parse(cfg.Endpoint)
 	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() {

@@ -1,18 +1,36 @@
 # Meta provider for CLIProxyAPI
 
-Read-only Meta subscription quota cards for stock CLIProxyAPI. Built on
+Full Meta (Muse) provider plugin for stock CLIProxyAPI: auth ownership,
+namespaced models, request execution, and subscription quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
 at `31d92c0` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
 and tested with the **real CLIProxyAPI v8.0.49 C-ABI loader** (ABI 1, RPC schema 10).
 Requires CLIProxyAPI v8.0.49 or newer.
 
-This is a **quota-only** plugin: it declares no auth, model or executor
-capability, so the host keeps serving Meta inference itself (including the
-core `meta` auths created by Meta OAuth login). The plugin only adds
-subscription quota cards. There is **no Scheduler**, preemptive
-quota-percentage avoidance, or automatic quota reset. Quota is display-only.
+## What it owns
 
-## How it works
+- **Auth** (`auth.go`): first-crack `ParseAuth` claim of the `meta-muse` key
+  plus the legacy `meta` key (takeover without file renames; rollback is a
+  persisted `type` string flip). Resolves API keys with attribute >
+  metadata > storage precedence (`dca:` tokens never count as API keys),
+  mints LLM keys from DCA tokens on refresh, and implements the stock
+  device-code login flow (`StartLogin`/`PollLogin`).
+- **Models** (`models.go`): static and per-auth models under the `meta-muse/`
+  namespace.
+- **Executor** (`executor.go`, `replay.go`, `prefilter.go`,
+  `promptcachekey.go`, `sanitize.go`): serves `openai-response`, `claude`,
+  `gemini` and `openai` client formats by translating to upstream Codex
+  `/responses`. It carries the four Meta fork patches so they can be dropped
+  from the fork: account-bound reasoning replay with a one-shot retry,
+  per-session `prompt_cache_key`, the fail-closed reasoning sanitizer, and
+  stream bootstrap peek with `response.subscription_usage` filtering.
+- **Quota** (`quota.go`, `quota_provider.go`, `subscription.go`): converging
+  subscription quota cards for both `meta` and `meta-muse` keys, fed passively
+  by usage events the executor observes on inference traffic (plus the
+  key-envelope poll). There is **no Scheduler**, preemptive quota-percentage
+  avoidance, or automatic quota reset. Quota is display-only.
+
+## How quota works
 
 Each poll POSTs an empty JSON object to the Meta key-envelope read
 (`https://api.meta.ai/muse-code/key`) through the credential's proxy
@@ -37,13 +55,45 @@ Accounts with no subscription (`is_subs_active:false`, no tier, no
 
 - Only `type: "meta"` credentials with a `dca_token` matching `^dca:\S+$`
   (max 4096 characters) are polled. Anything else is rejected without a request.
-- The DCA token is never logged, persisted or included in errors, and the
-  normalized card never contains the envelope key, email or name.
+- Raw executor HTTP requests are gated to `https` URLs on the credential's
+  own base-URL host (plus the hardcoded Meta auth/mint hosts) before any
+  bearer token is attached; client-supplied identity headers are dropped
+  case-insensitively so per-request session isolation holds.
+- The DCA token is persisted as the credential storage of record (the quota
+  poll reads it back from storage) and is never logged or included in errors,
+  and the normalized card never contains the envelope key, email or name.
+
+## Config
+
+Reasoning replay defaults off (same default as the fork core). To enable it,
+set the plugin subtree (plugin id `meta`):
+
+```yaml
+plugins:
+  configs:
+    meta:
+      reasoning-replay:
+        enabled: true
+        models: ["muse-spark-*"]  # optional glob canary; empty means every Meta model
+```
+
+Without this subtree (or with `enabled: false`), untagged envelopes are
+forwarded as-is and responses carry no provenance tags.
+
+`prompt_cache_key` needs no configuration: it is always on, derived per
+session (`cliproxy/meta-pck/v1`, 32 hex chars), set only when absent, and
+never overrides a client-supplied or body key.
+
+When migrating from the fork's core `meta` provider, move Meta-scoped keys
+from `meta` to the plugin provider key `meta-muse` (`oauth-model-alias`,
+`oauth-excluded-models`, payload rules). Auth files themselves need no
+migration (see below).
 
 ## Auth files
 
-No new auth files are needed: the plugin reads the `dca_token` from the
-existing core `meta` auths (host metadata over object storage). Never put
+No new auth files are needed for existing users: the plugin takes over the
+existing core `meta` auths in place (host metadata over object storage).
+Rollback is flipping the persisted `type` back to `"meta"`. Never put
 real auth files in this repository.
 
 ## Provenance
