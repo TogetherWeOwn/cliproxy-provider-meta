@@ -421,13 +421,30 @@ func mintMetaAPIKey(ctx context.Context, client pluginapi.HostHTTPClient, dcaTok
 	return &minted, nil
 }
 
+// metaRefreshDisabled reports whether the stored credential is disabled,
+// reading through the merged stored fields (metadata over storage).
+// ParseAuth strips "disabled" from StorageJSON but records it in Metadata, so
+// storage alone cannot answer this: the merged helper sees both.
+func metaRefreshDisabled(storage []byte, metadata map[string]any) bool {
+	fields, err := metaStoredFields(storage, metadata)
+	if err != nil {
+		return false
+	}
+	disabled, _ := fields["disabled"].(bool)
+	return disabled
+}
+
 // RefreshAuth mints an API key from the DCA token when the credential has no
 // usable key. Credentials that already carry a key pass through unchanged.
 func (p *metaAuthProvider) RefreshAuth(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
 	_, token := metaCreds(req.StorageJSON, req.Metadata, req.Attributes)
 	if token != "" {
+		// The host backfills identity fields on refresh but not Disabled, so
+		// carry it explicitly: otherwise a refresh re-enables a disabled
+		// credential.
 		return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
 			Provider: metaMuseNamespace, ID: req.AuthID,
+			Disabled:    metaRefreshDisabled(req.StorageJSON, req.Metadata),
 			StorageJSON: bytes.Clone(req.StorageJSON), Metadata: req.Metadata, Attributes: req.Attributes,
 		}}, nil
 	}
@@ -468,6 +485,12 @@ func (p *metaAuthProvider) RefreshAuth(ctx context.Context, req pluginapi.AuthRe
 		metadata[k] = v
 	}
 	metadata["type"] = metaMuseNamespace
+	// Merged storage must not clobber the live disabled flag ParseAuth records
+	// in metadata: storage predates it and a refresh must never re-enable a
+	// disabled credential.
+	if v, ok := req.Metadata["disabled"]; ok {
+		metadata["disabled"] = v
+	}
 	attributes := map[string]string{}
 	for k, v := range req.Attributes {
 		attributes[k] = v
@@ -477,6 +500,7 @@ func (p *metaAuthProvider) RefreshAuth(ctx context.Context, req pluginapi.AuthRe
 	attributes["access_token"] = minted.APIKey
 	return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
 		Provider: metaMuseNamespace, ID: req.AuthID,
+		Disabled:    metaRefreshDisabled(req.StorageJSON, req.Metadata),
 		StorageJSON: raw, Metadata: metadata, Attributes: attributes,
 	}}, nil
 }

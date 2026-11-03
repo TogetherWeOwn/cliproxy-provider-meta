@@ -1013,7 +1013,52 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 	if len(msg) > 4096 {
 		msg = msg[:4096]
 	}
-	return providerkit.MapError(&metaUpstreamError{statusCode: statusCode, message: msg})
+	mapped := providerkit.MapError(&metaUpstreamError{statusCode: statusCode, message: msg})
+	// Surface Meta's own error token (e.g. client_attestation_denied): the kit
+	// sanitizes the mapped error to "plugin operation failed", which hides the
+	// code callers need. Only the token is ever surfaced, in a fixed-format
+	// message; the raw body and error.message are never copied.
+	if code := metaUpstreamErrorCode(body); code != "" {
+		mapped.Code = code
+		mapped.Message = fmt.Sprintf("Meta request failed (HTTP %d: %s)", statusCode, code)
+	}
+	return mapped
+}
+
+// metaUpstreamErrorCode extracts a safe upstream error token from a Meta
+// error body: error.code must be a JSON string starting with [a-z0-9_] and
+// continuing with [a-z0-9_.-] (max 64 chars). Anything else (absent,
+// malformed, non-string, too long) yields "" and the caller falls back to
+// the sanitized kit error.
+func metaUpstreamErrorCode(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	code := gjson.GetBytes(body, "error.code")
+	if code.Type != gjson.String {
+		return ""
+	}
+	token := code.String()
+	if len(token) == 0 || len(token) > 64 {
+		return ""
+	}
+	if !isMetaErrorTokenStart(token[0]) {
+		return ""
+	}
+	for i := 1; i < len(token); i++ {
+		if !isMetaErrorTokenChar(token[i]) {
+			return ""
+		}
+	}
+	return token
+}
+
+func isMetaErrorTokenStart(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_'
+}
+
+func isMetaErrorTokenChar(c byte) bool {
+	return isMetaErrorTokenStart(c) || c == '.' || c == '-'
 }
 
 type metaUpstreamError struct {

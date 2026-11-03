@@ -101,7 +101,7 @@ func TestRealHostLoader(t *testing.T) {
 		t.Fatalf("executor candidate missing: %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.1" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.2" {
 		t.Fatalf("metadata %+v", info)
 	}
 	storage, _ := json.Marshal(map[string]any{"type": "meta", "dca_token": "dca:hostcompat-token", "api_key": "hostcompat-key", "label": "Example"})
@@ -131,7 +131,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "meta" || reg.Plugins[0].Version != "0.2.1" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "meta" || reg.Plugins[0].Version != "0.2.2" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }
