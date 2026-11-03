@@ -74,8 +74,8 @@ func TestWrapMetaUpstreamErrorFallsBack(t *testing.T) {
 	}
 }
 
-// TestWrapMetaUpstreamErrorPassesThroughToolChoiceRejection is the TWO-1797
-// repro: Meta rejects a forced tool_choice with a 400 whose actionable
+// TestWrapMetaUpstreamErrorPassesThroughToolChoiceRejection covers the
+// forced-tool_choice repro: Meta rejects it with a 400 whose actionable
 // message (plus type and param) must reach the client instead of the generic
 // "plugin operation failed". The payload is rebuilt field by field, so the
 // host renders it in both the OpenAI and Claude error shapes.
