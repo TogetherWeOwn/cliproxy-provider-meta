@@ -6,11 +6,16 @@ import (
 	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/TogetherWeOwn/cliproxy-provider-kit/cabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+
+	// Link the built-in format translators: without them every
+	// sdktranslator call is a no-op and non-Responses clients reach Meta
+	// with an untranslated body.
+	_ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin"
 )
 
 const (
 	displayName = "Meta"
-	version     = "0.2.0"
+	version     = "0.2.1"
 )
 
 func main() {}
