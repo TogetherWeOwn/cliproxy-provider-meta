@@ -153,6 +153,11 @@ func mergeMetaFields(req pluginapi.ExecutorRequest) map[string]any {
 // Execute runs one non-streaming request: POST, collect, filter, retry, tag,
 // translate back to the client format.
 func (e *metaExecutor) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+	// Core parity: compaction runs on its own path, never as a normal
+	// /responses call. Rejected before any upstream call, as core does.
+	if strings.TrimSpace(req.Alt) == "responses/compact" {
+		return pluginapi.ExecutorResponse{}, wrapMetaUpstreamError(http.StatusNotImplemented, []byte("/responses/compact not supported"))
+	}
 	prepared, err := e.prepare(req)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
@@ -217,6 +222,10 @@ func (e *metaExecutor) Execute(ctx context.Context, req pluginapi.ExecutorReques
 // foreign-envelope rejection Cham arriving as a 200-stream error event still
 // retries once without reasoning. Anything peeked is rewound onto the stream.
 func (e *metaExecutor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+	// Core parity: see Execute.
+	if strings.TrimSpace(req.Alt) == "responses/compact" {
+		return pluginapi.ExecutorStreamResponse{}, wrapMetaUpstreamError(http.StatusNotImplemented, []byte("/responses/compact not supported"))
+	}
 	prepared, err := e.prepare(req)
 	if err != nil {
 		return pluginapi.ExecutorStreamResponse{}, err
@@ -1010,6 +1019,10 @@ type metaUpstreamError struct {
 }
 
 func (e *metaUpstreamError) Error() string { return e.message }
+
+// StatusCode lets the kit preserve the upstream status (notably the 501 for
+// responses/compact) instead of collapsing every executor error to 500.
+func (e *metaUpstreamError) StatusCode() int { return e.statusCode }
 
 func goosName() string {
 	switch runtime.GOOS {

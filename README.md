@@ -61,6 +61,32 @@ from the card; a tier-only card means quota-blind, never fabricated.
   poll reads it back from storage) and is never logged or included in errors,
   and the normalized card never contains the envelope key, email or name.
 
+## Config
+
+Reasoning replay defaults off (same default as the fork core). To enable it,
+set the plugin subtree (plugin id `meta`):
+
+```yaml
+plugins:
+  configs:
+    meta:
+      reasoning-replay:
+        enabled: true
+        models: ["muse-spark-*"]  # optional glob canary; empty means every Meta model
+```
+
+Without this subtree (or with `enabled: false`), untagged envelopes are
+forwarded as-is and responses carry no provenance tags.
+
+`prompt_cache_key` needs no configuration: it is always on, derived per
+session (`cliproxy/meta-pck/v1`, 32 hex chars), set only when absent, and
+never overrides a client-supplied or body key.
+
+When migrating from the fork's core `meta` provider, move Meta-scoped keys
+from `meta` to the plugin provider key `meta-muse` (`oauth-model-alias`,
+`oauth-excluded-models`, payload rules). Auth files themselves need no
+migration (see below).
+
 ## Auth files
 
 No new auth files are needed for existing users: the plugin takes over the

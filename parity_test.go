@@ -24,8 +24,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -480,6 +482,188 @@ func TestParityAuthTakeover(t *testing.T) {
 	}
 	if dca := metaDCAToken(storage, nil, nil); dca != "dca:stored" {
 		t.Fatalf("dca = %q", dca)
+	}
+}
+
+// TestParityAuthIDLeftEmpty proves ParseAuth leaves ID empty so the host
+// derives the same path-relative ID core uses (pluginAuthDataToCoreAuth falls
+// back to authIDForPath). A plugin-invented ID would fork the replay account
+// key across the cutover, rollback, and restarts.
+func TestParityAuthIDLeftEmpty(t *testing.T) {
+	auth := &metaAuthProvider{}
+	for _, typ := range []string{providerID, metaMuseNamespace} {
+		resp, err := auth.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			RawJSON:  []byte(`{"type":"` + typ + `","api_key":"k"}`),
+			Path:     "/auths/meta-user.json",
+			FileName: "meta-user.json",
+		})
+		if err != nil || !resp.Handled {
+			t.Fatalf("type %q not claimed: %+v %v", typ, resp, err)
+		}
+		if resp.Auth.ID != "" {
+			t.Fatalf("type %q: ParseAuth ID = %q, want empty so the host derives the path-relative ID", typ, resp.Auth.ID)
+		}
+		if resp.Auth.FileName != "meta-user.json" {
+			t.Fatalf("type %q: FileName = %q, want the host-supplied name", typ, resp.Auth.FileName)
+		}
+	}
+	// A file carrying an explicit id field must not pin the runtime ID either:
+	// core file auths have no id field; the ID is path-derived.
+	resp, err := auth.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+		RawJSON:  []byte(`{"type":"meta","id":"meta-muse:abc123","api_key":"k"}`),
+		Path:     "/auths/meta-user.json",
+		FileName: "meta-user.json",
+	})
+	if err != nil || !resp.Handled {
+		t.Fatalf("legacy file not claimed: %+v %v", resp, err)
+	}
+	if resp.Auth.ID != "" {
+		t.Fatalf("explicit file id leaked into runtime ID = %q, want empty", resp.Auth.ID)
+	}
+}
+
+// TestParityPollLoginLeavesIDEmpty proves a successful device login returns an
+// empty ID with the FileName already set, so the host login-save path derives
+// the path ID from CredentialFileName — the same ID a restart derives, and
+// never a token hash that changes on every re-mint.
+func TestParityPollLoginLeavesIDEmpty(t *testing.T) {
+	fake := &fakeSecurityHTTPClient{}
+	fake.do = func(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+		if strings.Contains(req.URL, "device/token") {
+			return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"access_token":"dca:test-token","token_type":"bearer","expires_in":3600}`)}, nil
+		}
+		return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"api_key":"sk-test-key","base_url":"https://api.meta.ai/v1","user_email":"test-user","user_full_name":"Test User"}`)}, nil
+	}
+	state := encodeMetaLoginState(metaLoginState{
+		DeviceCode:      "dc-1",
+		TokenEndpoint:   metaTokenEndpoint,
+		IntervalSeconds: 5,
+		ExpiresAtUnix:   time.Now().Add(time.Hour).Unix(),
+	})
+	resp, err := (&metaAuthProvider{}).PollLogin(context.Background(), pluginapi.AuthLoginPollRequest{
+		State: state, HTTPClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != pluginapi.AuthLoginStatusSuccess {
+		t.Fatalf("status = %q, want success", resp.Status)
+	}
+	if resp.Auth.ID != "" {
+		t.Fatalf("PollLogin ID = %q, want empty so the host derives the path-relative ID", resp.Auth.ID)
+	}
+	if !strings.HasPrefix(resp.Auth.FileName, "meta-test-user-") {
+		t.Fatalf("FileName = %q, want the CredentialFileName for the minted account", resp.Auth.FileName)
+	}
+	if len(fake.doCalls) != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (token poll + mint)", len(fake.doCalls))
+	}
+}
+
+// TestParityAccountKeyPathRelative proves the replay account key is keyed on a
+// path-relative auth ID (e.g. meta-<file>.json): stable across a plugin-only
+// restart, distinct per account file, and able to verify a fork-era tag minted
+// under the same path-relative ID (cutover and rollback round trip).
+func TestParityAccountKeyPathRelative(t *testing.T) {
+	const authID = "meta-user_example.com-a1b2c3d4e5f60718.json"
+	first := metaReasoningAccountKey(authID)
+	if first == "" || len(first) != 16 {
+		t.Fatalf("account key = %q, want 16 hex chars", first)
+	}
+	// Restart: the same file derives the same key.
+	if again := metaReasoningAccountKey(authID); again != first {
+		t.Fatalf("restart derived %q, want %q", again, first)
+	}
+	// Another account file derives a different key.
+	if other := metaReasoningAccountKey("meta-other_example.com-0011223344556677.json"); other == first {
+		t.Fatalf("different file derived the same account key %q", other)
+	}
+	// A fork-era tag minted under the same path-relative ID verifies.
+	env := parityEnvelope(t)
+	policy := parityReplay(authID, "")
+	if !policy.enabled || policy.accountKey != first {
+		t.Fatalf("policy not enabled for path-relative ID (enabled=%v key=%q)", policy.enabled, policy.accountKey)
+	}
+	if decided := policy.decide(TagMetaReasoning(first, env)); decided.drop || decided.replay != env {
+		t.Fatalf("path-relative tag not kept stripped: %+v", decided)
+	}
+}
+
+// parityCompactHTTPClient records upstream calls on both lanes so the compact
+// tests can prove none is made.
+type parityCompactHTTPClient struct {
+	doCalls     int
+	streamCalls int
+}
+
+func (f *parityCompactHTTPClient) Do(_ context.Context, _ pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	f.doCalls++
+	return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{}`)}, nil
+}
+
+func (f *parityCompactHTTPClient) DoStream(_ context.Context, _ pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	f.streamCalls++
+	return pluginapi.HTTPStreamResponse{}, nil
+}
+
+func parityCompactError(t *testing.T, err error) {
+	t.Helper()
+	perr, ok := err.(*pluginabi.Error)
+	if !ok {
+		t.Fatalf("compact error type = %T, want *pluginabi.Error", err)
+	}
+	if perr.HTTPStatus != http.StatusNotImplemented {
+		t.Fatalf("compact HTTPStatus = %d, want 501", perr.HTTPStatus)
+	}
+}
+
+// TestParityResponsesCompactNotImplemented proves responses/compact is rejected
+// with 501 before any upstream call on both lanes, as core does — a compact
+// request must never execute as a normal /responses call. CountTokens parity:
+// the fork has no Alt guard there, so counting with Alt set still succeeds.
+func TestParityResponsesCompactNotImplemented(t *testing.T) {
+	ctx := context.Background()
+	e := newMetaExecutor(nil, &metaAuthProvider{})
+	body := []byte(`{"model":"muse-spark-1.3","input":[]}`)
+	newReq := func(fake *parityCompactHTTPClient) pluginapi.ExecutorRequest {
+		return pluginapi.ExecutorRequest{
+			Alt:             "responses/compact",
+			Model:           metaMuseNamespace + "/muse-spark-1.3",
+			Format:          "openai-response",
+			SourceFormat:    "openai-response",
+			Payload:         body,
+			OriginalRequest: body,
+			Headers:         http.Header{},
+			HTTPClient:      fake,
+		}
+	}
+
+	fake := &parityCompactHTTPClient{}
+	if _, err := e.Execute(ctx, newReq(fake)); err == nil {
+		t.Fatal("Execute accepted responses/compact, want 501")
+	} else {
+		parityCompactError(t, err)
+	}
+	if fake.doCalls != 0 || fake.streamCalls != 0 {
+		t.Fatalf("Execute made %d+%d upstream calls, want none", fake.doCalls, fake.streamCalls)
+	}
+
+	fake = &parityCompactHTTPClient{}
+	if _, err := e.ExecuteStream(ctx, newReq(fake)); err == nil {
+		t.Fatal("ExecuteStream accepted responses/compact, want 501")
+	} else {
+		parityCompactError(t, err)
+	}
+	if fake.doCalls != 0 || fake.streamCalls != 0 {
+		t.Fatalf("ExecuteStream made %d+%d upstream calls, want none", fake.doCalls, fake.streamCalls)
+	}
+
+	counted, err := e.CountTokens(ctx, newReq(&parityCompactHTTPClient{}))
+	if err != nil {
+		t.Fatalf("CountTokens with Alt set failed: %v (fork has no Alt guard there)", err)
+	}
+	if len(counted.Payload) == 0 {
+		t.Fatal("CountTokens with Alt set returned no payload")
 	}
 }
 

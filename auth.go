@@ -120,9 +120,11 @@ func metaDCAToken(storage []byte, metadata map[string]any, attributes map[string
 }
 
 // ParseAuth claims auth files of type "meta-muse" (this plugin) or "meta"
-// (legacy core takeover). Path-based IDs keep identities stable across the
-// cutover, so filenames, IDs and tokens never change; only the persisted type
-// flips, which makes reversal a type-string flip.
+// (legacy core takeover). The plugin leaves ID empty so the host derives the
+// same path-relative ID core uses (pluginAuthDataToCoreAuth falls back to
+// authIDForPath): filenames, tokens and account keys stay stable across the
+// cutover, rollback, and restarts, and only the persisted type flips, which
+// makes reversal a type-string flip.
 func (p *metaAuthProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
 	var fields map[string]any
 	if err := json.Unmarshal(req.RawJSON, &fields); err != nil || fields == nil {
@@ -135,19 +137,9 @@ func (p *metaAuthProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseR
 	if req.Provider != "" && req.Provider != metaMuseNamespace && req.Provider != providerID {
 		return pluginapi.AuthParseResponse{}, nil
 	}
-	id, _ := fields["id"].(string)
-	id = strings.TrimSpace(id)
-	if id == "" {
-		sum := sha256.Sum256(req.RawJSON)
-		id = metaMuseNamespace + ":" + fmt.Sprintf("%x", sum[:6])
-		if path := strings.TrimSpace(req.Path); path != "" {
-			id = metaMuseNamespace + ":" + fmt.Sprintf("%x", sha256.Sum256([]byte(path)))[:12]
-		}
-	}
 	text := func(name string) string { v, _ := fields[name].(string); return strings.TrimSpace(v) }
 	auth := pluginapi.AuthData{
 		Provider: metaMuseNamespace,
-		ID:       id,
 		FileName: req.FileName,
 		Label:    text("label"),
 		Prefix:   text("prefix"),
@@ -350,9 +342,12 @@ func (p *metaAuthProvider) PollLogin(ctx context.Context, req pluginapi.AuthLogi
 			}
 		}
 		raw, _ := json.Marshal(storage)
+		// ID stays empty so the host derives the path-relative ID from
+		// FileName (CredentialFileName below), exactly as it does for a
+		// ParseAuth-claimed file: the account key survives re-minting and
+		// restarts because it is never derived from the short-lived token.
 		auth := pluginapi.AuthData{
 			Provider:    metaMuseNamespace,
-			ID:          metaMuseNamespace + ":" + shortHash(token.AccessToken),
 			StorageJSON: raw,
 			Metadata:    map[string]any{"type": metaMuseNamespace},
 		}
@@ -506,9 +501,4 @@ func CredentialFileName(email, sub string) string {
 		return fmt.Sprintf("meta-%x.json", hash[:8])
 	}
 	return "meta-oauth.json"
-}
-
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", sum[:6])
 }
