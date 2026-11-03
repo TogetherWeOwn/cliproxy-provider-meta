@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -557,6 +558,53 @@ func TestParityPollLoginLeavesIDEmpty(t *testing.T) {
 	}
 	if len(fake.doCalls) != 2 {
 		t.Fatalf("upstream calls = %d, want 2 (token poll + mint)", len(fake.doCalls))
+	}
+}
+
+// TestParityPollLoginMintFailureStillSaves proves an approved device login
+// with a failed mint still succeeds with a DCA-derived filename (core parity:
+// meta.CredentialFileName(email, dcaToken)), so the host can save the
+// credential and derive an ID instead of failing the commit with no filename
+// and no ID. The DCA token is retained for a later mint.
+func TestParityPollLoginMintFailureStillSaves(t *testing.T) {
+	fake := &fakeSecurityHTTPClient{}
+	fake.do = func(req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+		if strings.Contains(req.URL, "device/token") {
+			return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"access_token":"dca:unminted-token","token_type":"bearer","expires_in":3600}`)}, nil
+		}
+		return pluginapi.HTTPResponse{StatusCode: 503, Body: []byte(`unavailable`)}, nil
+	}
+	state := encodeMetaLoginState(metaLoginState{
+		DeviceCode:      "dc-1",
+		TokenEndpoint:   metaTokenEndpoint,
+		IntervalSeconds: 5,
+		ExpiresAtUnix:   time.Now().Add(time.Hour).Unix(),
+	})
+	resp, err := (&metaAuthProvider{}).PollLogin(context.Background(), pluginapi.AuthLoginPollRequest{
+		State: state, HTTPClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != pluginapi.AuthLoginStatusSuccess {
+		t.Fatalf("status = %q, want success (mint failure must not fail an approved login)", resp.Status)
+	}
+	if resp.Auth.ID != "" {
+		t.Fatalf("PollLogin ID = %q, want empty", resp.Auth.ID)
+	}
+	wantFile := CredentialFileName("", "dca:unminted-token")
+	if resp.Auth.FileName != wantFile {
+		t.Fatalf("FileName = %q, want DCA-derived %q", resp.Auth.FileName, wantFile)
+	}
+	var storage map[string]any
+	if err := json.Unmarshal(resp.Auth.StorageJSON, &storage); err != nil {
+		t.Fatal(err)
+	}
+	if storage["dca_token"] != "dca:unminted-token" {
+		t.Fatalf("storage lost the DCA token: %v", storage)
+	}
+	if _, hasKey := storage["api_key"]; hasKey {
+		t.Fatalf("storage has api_key despite failed mint: %v", storage)
 	}
 }
 

@@ -354,9 +354,12 @@ func (p *metaAuthProvider) PollLogin(ctx context.Context, req pluginapi.AuthLogi
 		for k, v := range storage {
 			auth.Metadata[k] = v
 		}
-		if email, _ := storage["email"].(string); strings.TrimSpace(email) != "" {
-			auth.FileName = CredentialFileName(strings.TrimSpace(email), "")
-		}
+		// Core parity (meta.CredentialFileName(email, dcaToken)): a minted
+		// email names the file; otherwise the DCA token does, so an approved
+		// login with a failed mint still saves (and the host still derives an
+		// ID) instead of failing the commit with no filename and no ID.
+		email, _ := storage["email"].(string)
+		auth.FileName = CredentialFileName(strings.TrimSpace(email), token.AccessToken)
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Auth: auth}, nil
 	}
 	var errResp struct {
