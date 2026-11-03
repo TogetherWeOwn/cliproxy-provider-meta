@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 
 	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/google/uuid"
@@ -1017,28 +1019,117 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 	// Surface Meta's own error token (e.g. client_attestation_denied): the kit
 	// sanitizes the mapped error to "plugin operation failed", which hides the
 	// code callers need. Only the token is ever surfaced, in a fixed-format
-	// message; the raw body and error.message are never copied.
-	if code := metaUpstreamErrorCode(body); code != "" {
+	// message; the raw body is never copied.
+	code := metaUpstreamErrorCode(body)
+	if code != "" {
 		mapped.Code = code
 		mapped.Message = fmt.Sprintf("Meta request failed (HTTP %d: %s)", statusCode, code)
+	}
+	// Request rejections additionally pass Meta's actionable reason through:
+	// without it a client cannot tell "unsupported tool_choice" from a plugin
+	// crash. The message is a newly built JSON error payload holding only the
+	// sanitized message/type/param/code fields extracted from the upstream
+	// error — never the raw body — because the stock host renders a JSON
+	// error string verbatim for OpenAI clients and extracts type+message for
+	// Claude clients, exactly as it does for the built-in executors.
+	if payload, errType := metaUpstreamErrorPayload(statusCode, body, code); payload != "" {
+		mapped.Message = payload
+		if mapped.Code == "plugin_error" && errType != "" {
+			mapped.Code = errType
+		}
 	}
 	return mapped
 }
 
-// metaUpstreamErrorCode extracts a safe upstream error token from a Meta
-// error body: error.code must be a JSON string starting with [a-z0-9_] and
-// continuing with [a-z0-9_.-] (max 64 chars). Anything else (absent,
-// malformed, non-string, too long) yields "" and the caller falls back to
-// the sanitized kit error.
-func metaUpstreamErrorCode(body []byte) string {
+// metaUpstreamErrorPayload builds the passthrough error payload for a Meta
+// request rejection, or "" when the error must keep the sanitized mapping.
+// Passthrough is limited to 4xx rejections other than 401/403: credential and
+// attestation failures stay token-only (their upstream text can describe the
+// credential), and 5xx text can carry upstream internals. The returned type
+// is the validated upstream error type token, for use as the RPC error code
+// when the upstream error carried no code token.
+func metaUpstreamErrorPayload(statusCode int, body []byte, code string) (payload, errType string) {
+	if statusCode < 400 || statusCode > 499 ||
+		statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return "", ""
+	}
+	message := metaUpstreamErrorString(body, "message", 512)
+	if message == "" {
+		return "", ""
+	}
+	detail := map[string]any{"message": message}
+	if code != "" {
+		detail["code"] = code
+	}
+	if typeToken := metaUpstreamErrorToken(body, "type"); typeToken != "" {
+		detail["type"] = typeToken
+		errType = typeToken
+	}
+	if param := metaUpstreamErrorString(body, "param", 128); param != "" {
+		detail["param"] = param
+	}
+	encoded, err := json.Marshal(map[string]any{"error": detail})
+	if err != nil {
+		return "", ""
+	}
+	return string(encoded), errType
+}
+
+// metaUpstreamErrorField reads one field from a Meta error body, accepting
+// both the plain error shape (error.<field>) and the response.failed stream
+// shape (response.error.<field>).
+func metaUpstreamErrorField(body []byte, field string) gjson.Result {
+	if value := gjson.GetBytes(body, "error."+field); value.Exists() {
+		return value
+	}
+	return gjson.GetBytes(body, "response.error."+field)
+}
+
+// metaUpstreamErrorString extracts one upstream error text field as a safe
+// single-line string: JSON strings only, control characters dropped,
+// whitespace collapsed, capped at maxRunes runes. Anything else yields "".
+func metaUpstreamErrorString(body []byte, field string, maxRunes int) string {
+	value := metaUpstreamErrorField(body, field)
+	if value.Type != gjson.String {
+		return ""
+	}
+	var b strings.Builder
+	runes := 0
+	pendingSpace := false
+	for _, r := range strings.ToValidUTF8(value.String(), "") {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			pendingSpace = b.Len() > 0
+			continue
+		}
+		width := 1
+		if pendingSpace {
+			width++
+		}
+		if runes+width > maxRunes {
+			break
+		}
+		if pendingSpace {
+			b.WriteByte(' ')
+			pendingSpace = false
+		}
+		b.WriteRune(r)
+		runes += width
+	}
+	return b.String()
+}
+
+// metaUpstreamErrorToken extracts one upstream error field that must be a
+// safe token: a JSON string starting with [a-z0-9_] and continuing with
+// [a-z0-9_.-] (max 64 chars). Anything else yields "".
+func metaUpstreamErrorToken(body []byte, field string) string {
 	if len(body) == 0 {
 		return ""
 	}
-	code := gjson.GetBytes(body, "error.code")
-	if code.Type != gjson.String {
+	value := metaUpstreamErrorField(body, field)
+	if value.Type != gjson.String {
 		return ""
 	}
-	token := code.String()
+	token := value.String()
 	if len(token) == 0 || len(token) > 64 {
 		return ""
 	}
@@ -1051,6 +1142,13 @@ func metaUpstreamErrorCode(body []byte) string {
 		}
 	}
 	return token
+}
+
+// metaUpstreamErrorCode extracts a safe upstream error token from a Meta
+// error body. Anything else (absent, malformed, non-string, too long) yields
+// "" and the caller falls back to the sanitized kit error.
+func metaUpstreamErrorCode(body []byte) string {
+	return metaUpstreamErrorToken(body, "code")
 }
 
 func isMetaErrorTokenStart(c byte) bool {
