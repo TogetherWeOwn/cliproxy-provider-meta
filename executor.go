@@ -209,7 +209,8 @@ func (e *metaExecutor) Execute(ctx context.Context, req pluginapi.ExecutorReques
 			}
 		}
 		out := completed
-		translated := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatCodex, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, out, nil)
+		var param any
+		translated := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatCodex, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, out, &param)
 		if len(bytes.TrimSpace(translated)) == 0 {
 			return pluginapi.ExecutorResponse{}, providerkit.MapError(fmt.Errorf("meta-muse executor: response translation produced no payload"))
 		}
@@ -302,11 +303,14 @@ func pumpMetaStream(ctx context.Context, e *metaExecutor, req pluginapi.Executor
 	var outputItemsFallback [][]byte
 	var pendingEventLine []byte
 	filteringSubscriptionUsage := false
+	// The stock stream translators keep per-stream state behind this pointer
+	// and dereference it on every event, so it must live for the whole stream.
+	var param any
 	emit := func(line []byte) bool {
 		if len(bytes.TrimSpace(line)) == 0 {
 			return true
 		}
-		chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FormatCodex, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, nil)
+		chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FormatCodex, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param)
 		for _, chunk := range chunks {
 			if len(bytes.TrimSpace(chunk)) == 0 {
 				continue
