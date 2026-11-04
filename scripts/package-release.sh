@@ -2,7 +2,15 @@
 set -euo pipefail
 
 # Local build/release tooling only. This script never installs or reloads a host.
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+# Reject enclosing repositories before creating output or invoking build tools.
+# Resolve physical paths so a symlinked checkout is still the same worktree.
+git_root=$(git -C "$root" rev-parse --show-toplevel)
+git_root=$(cd -- "$git_root" && pwd -P)
+[[ "$git_root" == "$root" ]] || {
+  echo 'Source root is not the Git worktree root' >&2
+  exit 1
+}
 go_bin=${GO:-go}
 version=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["plugins"][0]["version"])' "$root/registry.json")
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid release version' >&2; exit 1; }

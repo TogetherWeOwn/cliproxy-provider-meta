@@ -14,12 +14,73 @@ import (
 	"testing"
 )
 
+func TestReleaseRejectsEnclosingRepository(t *testing.T) {
+	outer := t.TempDir()
+	nested := filepath.Join(outer, "plugin")
+	if err := os.MkdirAll(filepath.Join(nested, "scripts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{"scripts/package-release.sh", "registry.json"} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, file), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Fixture", "-c", "user.email=fixture.invalid", "commit", "-qm", "fixture"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = outer
+		if raw, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture: %v\n%s", err, raw)
+		}
+	}
+	// A build-tool sentinel ensures the provenance gate precedes any build.
+	goSentinel := filepath.Join(t.TempDir(), "go-sentinel")
+	if err := os.WriteFile(goSentinel, []byte("#!/bin/sh\nprintf 'BUILD REACHED\\n' >&2\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "must-not-exist")
+	cmd := exec.Command("bash", filepath.Join(nested, "scripts/package-release.sh"), out)
+	cmd.Env = append(os.Environ(), "GO="+goSentinel)
+	raw, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(raw), "Source root is not the Git worktree root") || strings.Contains(string(raw), "BUILD REACHED") {
+		t.Fatalf("nested source must refuse enclosing provenance before build: %v\n%s", err, raw)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("refused provenance created build output: %v", err)
+	}
+	// The exact same source is accepted once it owns a standalone repository.
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Fixture", "-c", "user.email=fixture.invalid", "commit", "-qm", "fixture"}} {
+		git := exec.Command("git", args...)
+		git.Dir = nested
+		if raw, err := git.CombinedOutput(); err != nil {
+			t.Fatalf("standalone fixture: %v\n%s", err, raw)
+		}
+	}
+	cmd = exec.Command("bash", filepath.Join(nested, "scripts/package-release.sh"), out)
+	cmd.Env = append(os.Environ(), "GO="+goSentinel)
+	raw, err = cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(raw), "BUILD REACHED") || strings.Contains(string(raw), "Source root is not") {
+		t.Fatalf("standalone source did not pass provenance gate: %v\n%s", err, raw)
+	}
+}
+
 func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("release target is linux/amd64")
 	}
 	out := t.TempDir()
-	cmd := exec.Command("bash", "scripts/package-release.sh", out)
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkedRoot := filepath.Join(t.TempDir(), "source")
+	if err := os.Symlink(root, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(linkedRoot, "scripts/package-release.sh"), out)
 	if result, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("package: %v\n%s", err, result)
 	}

@@ -65,6 +65,7 @@ func evidenceExecutor(t *testing.T, out io.Writer) *metaExecutor {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { finishEvidence(t, e.evidence) })
 	return e
 }
 
@@ -107,8 +108,15 @@ func runEvidenceRequest(t *testing.T, e *metaExecutor, req pluginapi.ExecutorReq
 	return out.Bytes()
 }
 
-func evidenceRecords(t *testing.T, out *bytes.Buffer) []map[string]any {
+func finishEvidence(t *testing.T, p *replayProducer) {
 	t.Helper()
+	p.stop()
+	awaitEvidence(t, p.done, "evidence writer shutdown")
+}
+
+func evidenceRecords(t *testing.T, out *bytes.Buffer, p *replayProducer) []map[string]any {
+	t.Helper()
+	finishEvidence(t, p)
 	var records []map[string]any
 	for _, line := range bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n")) {
 		var event map[string]any
@@ -160,7 +168,7 @@ func TestReplayEvidenceTwoTurnToolLinkage(t *testing.T) {
 			if !bytes.Contains(second.requests[0].Body, []byte("call-probe-1")) {
 				t.Fatal("second request lost tool result linkage")
 			}
-			records := evidenceRecords(t, &out)
+			records := evidenceRecords(t, &out, e.evidence)
 			if len(records) != 3 || records[1]["turn"] != float64(1) || records[1]["kept"] != float64(0) || records[2]["kept"] != float64(1) || records[2]["dropped_foreign"] != float64(0) {
 				t.Fatalf("actual production-site events: %+v", records)
 			}
@@ -204,7 +212,7 @@ func TestReplayEvidenceForeignDropsAndRetry(t *testing.T) {
 				} else {
 					runEvidenceRequest(t, e, evidenceRequest(payload, stream, client))
 				}
-				records := evidenceRecords(t, &out)
+				records := evidenceRecords(t, &out, e.evidence)
 				if records[1]["kept"] != float64(1) || records[1]["dropped_foreign"] != float64(1) {
 					t.Fatalf("foreign drop hidden: %+v", records)
 				}
@@ -281,12 +289,14 @@ func TestReplayEvidenceValidation(t *testing.T) {
 			client := &evidenceHTTPClient{}
 			r := evidenceRequest([]byte(`{"input":[]}`), false, client)
 			mutate(&r)
-			before := out.Len()
 			runEvidenceRequest(t, e, r)
-			if out.Len() != before || len(client.requests) != 1 {
+			if len(client.requests) != 1 {
 				t.Fatal("invalid diagnostics must not emit, fail, or change inference")
 			}
 		})
+	}
+	if records := evidenceRecords(t, &out, e.evidence); len(records) != 1 {
+		t.Fatalf("invalid metadata emitted decisions: %+v", records)
 	}
 	for _, turn := range []any{2, float64(2), json.Number("2")} {
 		r := evidenceRequest([]byte(`{"input":[]}`), false, &evidenceHTTPClient{})
@@ -313,7 +323,7 @@ func TestReplayEvidenceConcurrentIdentityAndIsolation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	records := evidenceRecords(t, &out)
+	records := evidenceRecords(t, &out, e.evidence)
 	if len(records) != count+1 {
 		t.Fatalf("lost events: %d", len(records))
 	}
@@ -337,6 +347,7 @@ func TestReplayEvidenceConcurrentIdentityAndIsolation(t *testing.T) {
 	if err != nil || p.instance == e.evidence.instance || uuid.Validate(p.instance) != nil {
 		t.Fatal("startup instance collision or invalid UUID")
 	}
+	finishEvidence(t, p)
 	if records[0]["schema"] != "replay-producer-startup-v1" || records[0]["file_logging"] != "not_configured" || records[0]["sources"].([]any)[0] != "stdout" {
 		t.Fatal("startup/source declaration changed")
 	}
@@ -346,10 +357,11 @@ func TestReplayEvidenceMirroredSinkDedupIdentity(t *testing.T) {
 	var stdout, file bytes.Buffer
 	e := evidenceExecutor(t, io.MultiWriter(&stdout, &file))
 	runEvidenceRequest(t, e, evidenceRequest([]byte(`{"input":[]}`), false, &evidenceHTTPClient{}))
+	finishEvidence(t, e.evidence)
 	if !bytes.Equal(stdout.Bytes(), file.Bytes()) {
 		t.Fatal("mirrored capture changed producer bytes or identity")
 	}
-	records := evidenceRecords(t, &stdout)
+	records := evidenceRecords(t, &stdout, e.evidence)
 	if len(records) != 2 || records[0]["event_id"] == records[1]["event_id"] {
 		t.Fatal("distinct startup/decision events collapsed")
 	}
@@ -367,7 +379,7 @@ func TestReplayEvidenceRedactionAndFinalKeptCount(t *testing.T) {
 	r.AuthAttributes["api_key"] = "private-credential"
 	r.Metadata["unrelated"] = "private-arbitrary-metadata"
 	runEvidenceRequest(t, e, r)
-	records := evidenceRecords(t, &out)
+	records := evidenceRecords(t, &out, e.evidence)
 	if records[1]["kept"] != float64(0) || bytes.Contains(client.requests[0].Body, []byte("not-a-native-envelope")) {
 		t.Fatal("prefilter approval was mislabeled as a surviving replay")
 	}
@@ -434,7 +446,7 @@ func TestReplayEvidenceDiagnosticsDoNotChangePolicyOrPayload(t *testing.T) {
 	if !bytes.Equal(bodies[0], bodies[1]) || !bytes.Equal(bodies[2], bodies[3]) {
 		t.Fatal("diagnostic metadata changed actual upstream payload/policy")
 	}
-	records := evidenceRecords(t, &out)
+	records := evidenceRecords(t, &out, e.evidence)
 	if len(records) != 3 || records[1]["replay_enabled"] != true || records[2]["replay_enabled"] != false || records[2]["kept"] != float64(0) || records[2]["dropped_foreign"] != float64(2) {
 		t.Fatalf("diagnostics changed disabled behavior: %+v", records)
 	}
@@ -459,7 +471,7 @@ func TestReplayEvidenceRetryFailureAndBounds(t *testing.T) {
 	if _, err := e.Execute(context.Background(), req); err == nil {
 		t.Fatal("second rejection must surface, not retry indefinitely")
 	}
-	records := evidenceRecords(t, &out)
+	records := evidenceRecords(t, &out, e.evidence)
 	if len(records) != 3 || len(client.requests) != 2 {
 		t.Fatal("retry must emit exactly two decisions")
 	}
@@ -491,16 +503,18 @@ func (shortEvidenceWriter) Write(p []byte) (int, error) { return len(p) / 2, nil
 
 func TestReplayEvidenceFailedSinkAndSequenceExhaustion(t *testing.T) {
 	e := evidenceExecutor(t, shortEvidenceWriter{})
+	awaitEvidence(t, e.evidence.done, "failed startup write")
 	if !e.evidence.failed {
 		t.Fatal("partial startup write must disable evidence")
 	}
 	runEvidenceRequest(t, e, evidenceRequest([]byte(`{"input":[]}`), false, &evidenceHTTPClient{}))
 	var out bytes.Buffer
 	e = evidenceExecutor(t, &out)
+	e.evidence.mu.Lock()
 	e.evidence.sequence = math.MaxUint64
-	before := out.Len()
+	e.evidence.mu.Unlock()
 	runEvidenceRequest(t, e, evidenceRequest([]byte(`{"input":[]}`), false, &evidenceHTTPClient{}))
-	if out.Len() != before {
+	if records := evidenceRecords(t, &out, e.evidence); len(records) != 1 {
 		t.Fatal("sequence exhaustion wrapped and reused identity")
 	}
 }

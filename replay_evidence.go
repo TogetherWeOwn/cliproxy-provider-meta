@@ -154,6 +154,13 @@ type replayDecisionEvent struct {
 	DroppedUntagged int    `json:"dropped_untagged"`
 }
 
+const replayQueueCapacity = 128
+
+type replayFailureEvent struct {
+	replayEventIdentity
+	Reason string `json:"reason"`
+}
+
 // One producer belongs to one plugin runtime. Its single NDJSON stdout sink is
 // independent of logrus formatting/levels and never opens files. A collector
 // must bind this startup identity to an actually inspected container/log handle;
@@ -163,7 +170,11 @@ type replayProducer struct {
 	instance string
 	sequence uint64
 	out      io.Writer
+	queue    chan []byte
+	done     chan struct{}
 	failed   bool
+	closed   bool
+	failure  []byte
 }
 
 func newReplayProducer(out io.Writer) (*replayProducer, error) {
@@ -171,7 +182,7 @@ func newReplayProducer(out io.Writer) (*replayProducer, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &replayProducer{instance: id.String(), out: out}
+	p := &replayProducer{instance: id.String(), out: out, queue: make(chan []byte, replayQueueCapacity), done: make(chan struct{})}
 	startup := replayStartupEvent{ProducerVersion: version, SourceModified: true, Sources: []string{"stdout"}, FileLogging: "not_configured"}
 	if _, err := hex.DecodeString(replayBuildRevision); err == nil && len(replayBuildRevision) == 40 {
 		startup.SourceRevision = replayBuildRevision
@@ -179,8 +190,11 @@ func newReplayProducer(out io.Writer) (*replayProducer, error) {
 	}
 	p.mu.Lock()
 	startup.replayEventIdentity = p.identity("replay-producer-startup-v1")
-	p.write(startup)
+	p.admit(startup)
 	p.mu.Unlock()
+	// Startup is queued before this sole writer starts, and before any caller
+	// can admit a decision. No startup or inference caller ever writes the sink.
+	go p.run()
 	return p, nil
 }
 
@@ -193,31 +207,78 @@ func (p *replayProducer) identity(schema string) replayEventIdentity {
 	}
 }
 
-// Stop producing on partial/failed writes or sequence exhaustion. Diagnostics
-// never fail inference, and missing/incomplete evidence cannot prove acceptance.
-func (p *replayProducer) write(event any) {
+// Admission is serialized, bounded and independent of sink progress. Overflow
+// is sticky: never allow a later green decision to replace lost evidence.
+// The caller holds mu; the writer never holds it during an output operation.
+func (p *replayProducer) admit(event any) {
 	data, err := json.Marshal(event)
-	if err != nil {
-		p.failed = true
+	if err != nil || len(data) >= 4095 {
+		p.sequence--
+		p.fail("encoding")
 		return
 	}
-	data = append(data, '\n')
-	n, err := p.out.Write(data)
-	p.failed = err != nil || n != len(data)
+	select {
+	case p.queue <- append(data, '\n'):
+	default:
+		// The rejected decision already allocated the next identity. Reuse it
+		// for the terminal failure, keeping the admitted prefix contiguous.
+		p.sequence--
+		p.fail("queue_overflow")
+	}
+}
+
+func (p *replayProducer) fail(reason string) {
+	p.failed = true
+	if p.sequence < math.MaxUint64 {
+		p.failure, _ = json.Marshal(replayFailureEvent{p.identity("replay-producer-failure-v1"), reason})
+		p.failure = append(p.failure, '\n')
+	}
+	p.closeQueue()
+}
+
+func (p *replayProducer) closeQueue() {
+	if !p.closed {
+		p.closed = true
+		close(p.queue)
+	}
+}
+
+// stop seals admission without waiting for I/O. A stalled writer is at most one
+// worker and one in-flight record, not one goroutine per request or retry.
+func (p *replayProducer) stop() {
+	p.mu.Lock()
+	p.closeQueue()
+	p.mu.Unlock()
+}
+
+func (p *replayProducer) run() {
+	defer close(p.done)
+	for data := range p.queue {
+		n, err := p.out.Write(data)
+		if err != nil || n != len(data) {
+			p.mu.Lock()
+			p.failed = true
+			p.closeQueue()
+			p.mu.Unlock()
+			return // Never retry an ambiguous/partial write or write a healthy tail.
+		}
+	}
+	p.mu.Lock()
+	failure := p.failure
+	p.mu.Unlock()
+	if len(failure) != 0 {
+		// Best effort only, after the admitted prefix, if a stalled sink resumes.
+		// Missing/truncated output still requires fail-closed collection.
+		_, _ = p.out.Write(failure)
+	}
 }
 
 func (p *replayProducer) record(prepared *preparedMetaRequest) {
 	if p == nil || prepared.correlation == nil {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.failed || p.sequence == math.MaxUint64 {
-		return
-	}
 	s := prepared.replay.stats
 	event := replayDecisionEvent{
-		replayEventIdentity: p.identity("replay-event-v1"),
 		recoveryCorrelation: *prepared.correlation,
 		RequestedModel:      prepared.requestedModel, ResolvedModel: prepared.baseModel,
 		ReplayEnabled:  prepared.replay.enabled,
@@ -233,5 +294,16 @@ func (p *replayProducer) record(prepared *preparedMetaRequest) {
 			event.Kept++
 		}
 	}
-	p.write(event)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	// Reserve the last sequence for a terminal failure, never wrap identity.
+	if p.sequence >= math.MaxUint64-1 {
+		p.fail("sequence_exhausted")
+		return
+	}
+	event.replayEventIdentity = p.identity("replay-event-v1")
+	p.admit(event)
 }

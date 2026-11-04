@@ -56,8 +56,8 @@ The existing SDK/RPC `pluginapi.ExecutorRequest.Metadata` extension bag carries:
 
 ## Production sites and counter semantics
 
-`makePlugin` creates a producer for each plugin runtime and immediately emits a
-`replay-producer-startup-v1` marker. `Execute` and `ExecuteStream` emit a
+`makePlugin` creates a producer for each plugin runtime and first queues a
+`replay-producer-startup-v1` marker. `Execute` and `ExecuteStream` queue a
 `replay-event-v1` immediately before each upstream call, after preparation and
 credential resolution. Token counting and rejected/failed preparation do not
 emit upstream decision records. HTTP/transport errors can follow a decision;
@@ -93,21 +93,55 @@ Identical copies in stdout/file capture retain byte-identical identities and
 content; distinct decisions and retries do not. The collector deduplicates only
 identical copies and rejects conflicting duplicates.
 
-Records are standalone ASCII NDJSON written directly to the opened process
-stdout handle, one bounded write (<4096 bytes) per record. They do not depend on
-logrus's formatter or level. Other host log lines may share stdout and are not
-producer records. The plugin opens **no diagnostic file**, declares
-`sources: ["stdout"]` and `file_logging: "not_configured"` at startup, and has no
-file-output configuration. If the host duplicates stdout into a file, that is
-an externally declared collector source, not a second producer. Failure/partial
-write disables further evidence for this runtime without failing inference;
-missing/truncated evidence must fail collection/acceptance closed.
+Records are standalone ASCII NDJSON admitted nonblockingly to a **128-record
+FIFO**, with one dedicated writer per runtime and at most one in-flight record.
+Each record is bounded (<4096 bytes); the queue, in-flight record and reserved
+terminal failure record bound retained output to less than 520 KiB per runtime.
+Only admission/identity assignment holds the producer mutex. No startup,
+execution, retry or shutdown caller waits for a sink write. This does not make
+other host/logrus output nonblocking: those pre-existing logs are independent.
+A permanently stalled sink can retain the single writer until process exit;
+there is no per-request worker, I/O retry loop or growing backlog. Shutdown seals
+admission but does not wait on I/O; pending output is not guaranteed at exit.
+
+The writer preserves startup-before-decisions and admission order, one write per
+record to the opened process stdout handle, independently of logrus formatting
+or level. Other host log lines may share stdout and are not producer records.
+The plugin opens **no diagnostic file**, declares `sources: ["stdout"]` and
+`file_logging: "not_configured"` at startup, and has no file-output configuration.
+If the host duplicates stdout into a file, that is an externally declared
+collector source, not a second producer.
+
+Queue saturation permanently seals admission for this runtime: no later green
+decision or retry may replace a lost record. If the sink resumes, the writer
+finishes the admitted prefix then writes a terminal `replay-producer-failure-v1`
+record with reason `queue_overflow` and the next contiguous identity. Sequence
+exhaustion reserves the final identity for the same failure type with reason
+`sequence_exhausted`; encoding failure uses reason `encoding`. A collector must
+reject **all acceptance from that producer** on any failure marker, not merely
+the last request. A partial/failed sink write terminates the writer without
+retrying ambiguous bytes or attempting a healthy tail. A failure marker itself
+is best effort, not guaranteed delivery.
+
+Admission is not delivery. An HTTP response, an empty read, a quiet interval, or
+the absence of a failure marker **does not prove the queue drained**. Required
+collection must account for delayed initial/retry records and complete source
+coverage; any missing expected decision, truncation, timeout, overflow, or
+unproven drain/coverage fails acceptance closed. Do not accept a finite prefix
+of a stalled producer's output as complete. The host/collector integration must
+establish its drain/completeness boundary; this plugin provides no synchronous
+flush RPC, health attestation or production acceptance. Unknown record schemas
+must fail closed, not be silently discarded. These limits also apply at process
+exit. Inference remains available even when its diagnostics are unusable.
 
 Startup also includes the plugin version and package-builder-stamped
 `source_revision` and `source_modified` (unstamped is conservative: empty
 revision and modified true). The builder reads Git from its explicit worktree
-root and disables automatic Go VCS discovery, which can otherwise report an
-enclosing checkout's unrelated revision for nested worktrees. It writes
+root, **requires its canonical physical path to equal Git's worktree root before
+creating output or building**, and disables automatic Go VCS discovery, which
+can otherwise report an enclosing checkout's unrelated revision. A tracked
+plugin subdirectory inside another repository is refused; standalone repositories,
+managed worktrees and symlinked paths to the same worktree remain supported. It writes
 `build-provenance.json` alongside the archive/checksums, binding source revision,
 HEAD tree, modified status, archive hash, extracted-library hash and schema hash.
 Harness-only `.claude` configuration is excluded from the modified check; all
@@ -131,7 +165,7 @@ field. No timestamp-window relabeling is permitted.
 ## Schema, examples, validation
 
 - [Exact JSON Schema](replay-event-v1.schema.json), draft 2020-12. The root
-  validates startup or decision records; `$defs.correlation` describes the
+  validates startup, decision or terminal failure records; `$defs.correlation` describes the
   metadata object. Cross-field constraints also require parent != self on turn
   2, event ID prefix == producer instance, canonical nonwrapping sequence, and
   startup-before-decisions. Consumers must enforce these, not just JSON types.

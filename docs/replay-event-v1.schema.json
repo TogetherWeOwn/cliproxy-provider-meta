@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Meta replay producer NDJSON record",
-  "oneOf": [{"$ref": "#/$defs/startup"}, {"$ref": "#/$defs/decision"}],
+  "oneOf": [{"$ref": "#/$defs/startup"}, {"$ref": "#/$defs/decision"}, {"$ref": "#/$defs/failure"}],
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"},
     "parent": {"type": "string", "maxLength": 128, "pattern": "^([A-Za-z0-9][A-Za-z0-9._:-]*)?(?![\\s\\S])"},
@@ -40,6 +40,18 @@
         "source_modified": {"type": "boolean"},
         "sources": {"const": ["stdout"]},
         "file_logging": {"const": "not_configured"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "producer_instance_id", "event_id", "timestamp", "reason"],
+      "properties": {
+        "schema": {"const": "replay-producer-failure-v1"},
+        "producer_instance_id": {"$ref": "#/$defs/instance"},
+        "event_id": {"$ref": "#/$defs/event_id"},
+        "timestamp": {"$ref": "#/$defs/timestamp"},
+        "reason": {"enum": ["queue_overflow", "sequence_exhausted", "encoding"]}
       }
     },
     "decision": {

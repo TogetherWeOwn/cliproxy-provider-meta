@@ -45,8 +45,11 @@ for path in sys.argv[2:]:
 if not records:
     raise ValueError("no producer examples")
 instances = {}
+failed_instances = set()
 for event in records:
     instance = event["producer_instance_id"]
+    if instance in failed_instances:
+        raise ValueError("record after terminal producer failure")
     prefix, sequence = event["event_id"].rsplit(":", 1)
     if prefix != instance or not 1 <= int(sequence) <= 2**64 - 1:
         raise ValueError("invalid event identity")
@@ -58,7 +61,9 @@ for event in records:
         if instance not in instances or int(sequence) != instances[instance] + 1:
             raise ValueError("missing startup or event sequence gap")
         instances[instance] += 1
-        if event["turn"] == 2 and event["parent_request_id"] == event["request_id"]:
+        if event["schema"] == "replay-producer-failure-v1":
+            failed_instances.add(instance)
+        elif event["turn"] == 2 and event["parent_request_id"] == event["request_id"]:
             raise ValueError("self-parent request")
 
 # Exercise schema negatives against a REAL decision example, not fixtures alone.
@@ -71,4 +76,5 @@ for key, value in [("kept", "01"), ("kept", -1), ("kept", 1.0), ("kept", True),
     negative[key] = value
     if validator.is_valid(negative):
         raise ValueError("schema accepted negative: " + key)
-print(f"Validated {len(records)} actual producer records and 10 schema negatives; no production acceptance")
+print(f"Validated {len(records)} actual producer records and 10 schema negatives; "
+      f"{len(failed_instances)} terminal failed producers (never acceptable); no production acceptance")
