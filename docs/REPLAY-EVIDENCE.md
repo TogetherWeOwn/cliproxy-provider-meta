@@ -93,7 +93,7 @@ Identical copies in stdout/file capture retain byte-identical identities and
 content; distinct decisions and retries do not. The collector deduplicates only
 identical copies and rejects conflicting duplicates.
 
-Records are standalone UTF-8 NDJSON written directly to the opened process
+Records are standalone ASCII NDJSON written directly to the opened process
 stdout handle, one bounded write (<4096 bytes) per record. They do not depend on
 logrus's formatter or level. Other host log lines may share stdout and are not
 producer records. The plugin opens **no diagnostic file**, declares
