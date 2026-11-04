@@ -59,8 +59,9 @@ const metaSubscriptionUsageEventType = "response.subscription_usage"
 
 // metaExecutor serves Meta Muse models over the plugin RPC boundary.
 type metaExecutor struct {
-	quota *quotaProvider
-	auth  *metaAuthProvider
+	quota    *quotaProvider
+	auth     *metaAuthProvider
+	evidence *replayProducer
 }
 
 func newMetaExecutor(quota *quotaProvider, auth *metaAuthProvider) *metaExecutor {
@@ -80,6 +81,8 @@ type preparedMetaRequest struct {
 	body            []byte
 	replay          metaReasoningReplay
 	replayRetried   bool
+	correlation     *recoveryCorrelation
+	requestedModel  string
 }
 
 // prepare builds the upstream Codex body for one executor request.
@@ -132,7 +135,10 @@ func (e *metaExecutor) prepare(req pluginapi.ExecutorRequest) (*preparedMetaRequ
 	translated = sanitizeMetaWebSearchTools(translated)
 	translated = ensureMetaMuseToolNamespace(translated)
 	translated = applyMetaPromptCacheKey(translated, req.Headers, req.Query, originalPayload, clientPayload, mergeMetaFields(req))
+	correlation, requestedModel := recoveryCorrelationFrom(req)
 	return &preparedMetaRequest{
+		correlation:     correlation,
+		requestedModel:  requestedModel,
 		baseModel:       baseModel,
 		from:            from,
 		responseFormat:  responseFormat,
@@ -164,13 +170,14 @@ func (e *metaExecutor) Execute(ctx context.Context, req pluginapi.ExecutorReques
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
-	prepared.replay.recordRequest(prepared.baseModel, req.AuthID)
+	prepared.replay.recordRequest()
 	baseURL, token, err := e.resolveCreds(ctx, req)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	for {
+		e.evidence.record(prepared)
 		resp, err := req.HTTPClient.Do(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     url,
@@ -233,13 +240,14 @@ func (e *metaExecutor) ExecuteStream(ctx context.Context, req pluginapi.Executor
 	if err != nil {
 		return pluginapi.ExecutorStreamResponse{}, err
 	}
-	prepared.replay.recordRequest(prepared.baseModel, req.AuthID)
+	prepared.replay.recordRequest()
 	baseURL, token, err := e.resolveCreds(ctx, req)
 	if err != nil {
 		return pluginapi.ExecutorStreamResponse{}, err
 	}
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	for {
+		e.evidence.record(prepared)
 		stream, err := req.HTTPClient.DoStream(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     url,
@@ -740,7 +748,8 @@ func metaProtectedClientHeader(name string) bool {
 	case "authorization", "content-type", "accept", "cache-control", "user-agent", "x-client-id":
 		return true
 	}
-	return strings.HasPrefix(lower, "x-tbh-") ||
+	return strings.HasPrefix(lower, "x-cpa-recovery-") ||
+		strings.HasPrefix(lower, "x-tbh-") ||
 		strings.HasPrefix(lower, "x-meta-") ||
 		strings.HasPrefix(lower, "x-muse-")
 }

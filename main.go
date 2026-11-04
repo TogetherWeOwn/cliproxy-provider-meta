@@ -15,7 +15,7 @@ import (
 
 const (
 	displayName = "Meta"
-	version     = "0.2.3"
+	version     = "0.2.4"
 )
 
 func main() {}
@@ -35,6 +35,11 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 	auth := &metaAuthProvider{quota: quota}
 	models := metaModelProvider{}
 	executor := newMetaExecutor(quota, auth)
+	producer, err := newReplayProducer(replayStdoutWriter{})
+	if err != nil {
+		return nil, err
+	}
+	executor.evidence = producer
 	return kit.New(kit.Definition{
 		Metadata:       pluginapi.Metadata{Name: displayName, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-meta", Logo: "https://www.google.com/s2/favicons?domain=meta.ai"},
 		ModelNamespace: metaMuseNamespace,
@@ -49,6 +54,6 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 			ExecutorOutputFormats: []string{"openai-response", "claude", "gemini", "openai"},
 			QuotaProvider:         quota,
 		},
-		OnShutdown: func(context.Context) error { client.CloseIdleConnections(); return nil },
+		OnShutdown: func(context.Context) error { producer.stop(); client.CloseIdleConnections(); return nil },
 	}, host)
 }
