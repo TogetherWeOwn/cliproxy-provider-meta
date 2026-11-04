@@ -63,11 +63,24 @@ func TestRealHostLoader(t *testing.T) {
 		ext = ".dylib"
 	}
 	lib := filepath.Join(arch, "meta"+ext)
-	build := exec.Command("go", "build", "-tags=hostcompat", "-buildmode=c-shared", "-o", lib, ".")
-	build.Dir = root
-	build.Env = append(os.Environ(), "CGO_ENABLED=1")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("c-shared build: %v\n%s", err, out)
+	prebuilt := os.Getenv("META_HOSTCOMPAT_LIBRARY")
+	if prebuilt != "" {
+		// Exact packaged production bytes: registration/startup only, never the
+		// network quota path (which requires the hostcompat-only endpoint seam).
+		data, err := os.ReadFile(prebuilt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(lib, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		build := exec.Command("go", "build", "-tags=hostcompat", "-buildmode=c-shared", "-o", lib, ".")
+		build.Dir = root
+		build.Env = append(os.Environ(), "CGO_ENABLED=1")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("c-shared build: %v\n%s", err, out)
+		}
 	}
 	if out, err := exec.Command("nm", "-D", lib).CombinedOutput(); err != nil || !strings.Contains(string(out), " T cliproxy_plugin_init") {
 		t.Fatalf("ABI entry point: %v\n%s", err, out)
@@ -103,6 +116,10 @@ func TestRealHostLoader(t *testing.T) {
 	info := host.RegisteredPlugins()
 	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.4" {
 		t.Fatalf("metadata %+v", info)
+	}
+	if prebuilt != "" {
+		t.Log("Exact package loader/startup verified; quota calls excluded on the production library")
+		return
 	}
 	storage, _ := json.Marshal(map[string]any{"type": "meta", "dca_token": "dca:hostcompat-token", "api_key": "hostcompat-key", "label": "Example"})
 	quotaReq := pluginapi.QuotaFetchRequest{AuthID: "hostcompat-auth", Provider: "meta", StorageJSON: storage}

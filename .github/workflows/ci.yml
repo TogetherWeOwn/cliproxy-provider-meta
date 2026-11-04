@@ -39,9 +39,11 @@ jobs:
         run: go -C integration/hostcompat test -race -count=1 ./...
       - name: Production C shared library
         run: |
-          go build -trimpath -buildmode=c-shared -o "$TMPDIR/meta.so" .
+          bash scripts/package-release.sh "$TMPDIR/package"
+          unzip -p "$TMPDIR/package/"*.zip meta.so > "$TMPDIR/meta.so"
           nm -D "$TMPDIR/meta.so" > "$TMPDIR/symbols.txt"
           grep -q ' T cliproxy_plugin_init$' "$TMPDIR/symbols.txt"
+          META_HOSTCOMPAT_LIBRARY="$TMPDIR/meta.so" go -C integration/hostcompat test -race -count=1 -run '^TestRealHostLoader$' -v ./...
       - name: Secret scan
         run: |
           go install github.com/zricethezav/gitleaks/v8@v8.24.3
