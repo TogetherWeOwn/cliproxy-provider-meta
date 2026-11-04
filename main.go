@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/TogetherWeOwn/cliproxy-provider-kit/cabi"
@@ -15,7 +16,7 @@ import (
 
 const (
 	displayName = "Meta"
-	version     = "0.2.2"
+	version     = "0.2.4"
 )
 
 func main() {}
@@ -35,6 +36,11 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 	auth := &metaAuthProvider{quota: quota}
 	models := metaModelProvider{}
 	executor := newMetaExecutor(quota, auth)
+	producer, err := newReplayProducer(os.Stdout)
+	if err != nil {
+		return nil, err
+	}
+	executor.evidence = producer
 	return kit.New(kit.Definition{
 		Metadata:       pluginapi.Metadata{Name: displayName, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-meta", Logo: "https://www.google.com/s2/favicons?domain=meta.ai"},
 		ModelNamespace: metaMuseNamespace,

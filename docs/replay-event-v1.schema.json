@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Meta replay producer NDJSON record",
+  "oneOf": [{"$ref": "#/$defs/startup"}, {"$ref": "#/$defs/decision"}],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*(?![\\s\\S])"},
+    "parent": {"type": "string", "maxLength": 128, "pattern": "^([A-Za-z0-9][A-Za-z0-9._:-]*)?(?![\\s\\S])"},
+    "model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/()+-]*(?![\\s\\S])"},
+    "instance": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\\s\\S])"},
+    "event_id": {"type": "string", "maxLength": 57, "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[1-9][0-9]{0,19}(?![\\s\\S])"},
+    "timestamp": {"type": "string", "format": "date-time", "maxLength": 30, "pattern": "Z(?![\\s\\S])"},
+    "counter": {"type": "integer", "minimum": 0},
+    "correlation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempt_id", "probe_id", "request_id", "parent_request_id", "turn"],
+      "properties": {
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "probe_id": {"$ref": "#/$defs/id"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "parent_request_id": {"$ref": "#/$defs/parent"},
+        "turn": {"type": "integer", "enum": [1, 2]}
+      },
+      "allOf": [
+        {"if": {"properties": {"turn": {"const": 1}}}, "then": {"properties": {"parent_request_id": {"const": ""}}}},
+        {"if": {"properties": {"turn": {"const": 2}}}, "then": {"properties": {"parent_request_id": {"minLength": 1}}}}
+      ]
+    },
+    "startup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "producer_instance_id", "event_id", "timestamp", "producer_version", "source_revision", "source_modified", "sources", "file_logging"],
+      "properties": {
+        "schema": {"const": "replay-producer-startup-v1"},
+        "producer_instance_id": {"$ref": "#/$defs/instance"},
+        "event_id": {"$ref": "#/$defs/event_id"},
+        "timestamp": {"$ref": "#/$defs/timestamp"},
+        "producer_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?![\\s\\S])"},
+        "source_revision": {"type": "string", "pattern": "^([0-9a-fA-F]{40})?(?![\\s\\S])"},
+        "source_modified": {"type": "boolean"},
+        "sources": {"const": ["stdout"]},
+        "file_logging": {"const": "not_configured"}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "producer_instance_id", "event_id", "timestamp", "attempt_id", "probe_id", "request_id", "parent_request_id", "turn", "requested_model", "resolved_model", "replay_attempt", "replay_enabled", "kept", "dropped_foreign", "dropped_untagged"],
+      "properties": {
+        "schema": {"const": "replay-event-v1"},
+        "producer_instance_id": {"$ref": "#/$defs/instance"},
+        "event_id": {"$ref": "#/$defs/event_id"},
+        "timestamp": {"$ref": "#/$defs/timestamp"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "probe_id": {"$ref": "#/$defs/id"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "parent_request_id": {"$ref": "#/$defs/parent"},
+        "turn": {"type": "integer", "enum": [1, 2]},
+        "requested_model": {"$ref": "#/$defs/model"},
+        "resolved_model": {"$ref": "#/$defs/model"},
+        "replay_attempt": {"type": "integer", "enum": [0, 1]},
+        "replay_enabled": {"type": "boolean"},
+        "kept": {"$ref": "#/$defs/counter"},
+        "dropped_foreign": {"$ref": "#/$defs/counter"},
+        "dropped_untagged": {"$ref": "#/$defs/counter"}
+      },
+      "allOf": [
+        {"if": {"properties": {"turn": {"const": 1}}}, "then": {"properties": {"parent_request_id": {"const": ""}}}},
+        {"if": {"properties": {"turn": {"const": 2}}}, "then": {"properties": {"parent_request_id": {"minLength": 1}}}},
+        {"if": {"properties": {"replay_attempt": {"const": 1}}}, "then": {"properties": {"kept": {"const": 0}, "replay_enabled": {"const": true}}}}
+      ]
+    }
+  }
+}

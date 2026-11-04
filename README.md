@@ -96,6 +96,14 @@ existing core `meta` auths in place (host metadata over object storage).
 Rollback is flipping the persisted `type` back to `"meta"`. Never put
 real auth files in this repository.
 
+## Replay diagnostics
+
+Optional bounded request-metadata correlation emits source-bound startup and
+replay-decision NDJSON to stdout, without forwarding diagnostic HTTP headers to
+Meta. See the [contract, schema and actual producer examples](docs/REPLAY-EVIDENCE.md).
+These diagnostics do not prove HTTP success, container provenance, or production
+replay acceptance, and do not change auth selection or replay policy.
+
 ## Provenance
 
 See [provenance](docs/PROVENANCE.md) for where the envelope shape and the

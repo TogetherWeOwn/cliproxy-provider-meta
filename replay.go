@@ -383,7 +383,7 @@ func (p metaReasoningReplay) tagReasoningItem(data []byte, itemPath string) []by
 
 // recordRequest logs what happened to the reasoning envelopes of one request, so the
 // replay hit rate (kept / (kept + dropped_foreign)) can be measured from the logs.
-func (p metaReasoningReplay) recordRequest(model, authID string) {
+func (p metaReasoningReplay) recordRequest() {
 	if p.stats == nil {
 		return
 	}
@@ -391,7 +391,7 @@ func (p metaReasoningReplay) recordRequest(model, authID string) {
 	if s.kept+s.droppedForeign+s.droppedUntagged == 0 {
 		return
 	}
-	log.Infof("meta-muse executor: meta reasoning replay: model=%s auth=%s kept=%d dropped_foreign=%d dropped_untagged=%d", model, authID, s.kept, s.droppedForeign, s.droppedUntagged)
+	log.Infof("meta-muse executor: meta reasoning replay: kept=%d dropped_foreign=%d dropped_untagged=%d", s.kept, s.droppedForeign, s.droppedUntagged)
 }
 
 // isMetaReasoningNotIssued reports whether an upstream error is Meta rejecting an
