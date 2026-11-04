@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 
 	kit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/TogetherWeOwn/cliproxy-provider-kit/cabi"
@@ -36,7 +35,7 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 	auth := &metaAuthProvider{quota: quota}
 	models := metaModelProvider{}
 	executor := newMetaExecutor(quota, auth)
-	producer, err := newReplayProducer(os.Stdout)
+	producer, err := newReplayProducer(replayStdoutWriter{})
 	if err != nil {
 		return nil, err
 	}

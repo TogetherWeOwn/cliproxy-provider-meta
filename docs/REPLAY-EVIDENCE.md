@@ -105,8 +105,13 @@ there is no per-request worker, I/O retry loop or growing backlog. Shutdown seal
 admission but does not wait on I/O; pending output is not guaranteed at exit.
 
 The writer preserves startup-before-decisions and admission order, one write per
-record to the opened process stdout handle, independently of logrus formatting
-or level. Other host log lines may share stdout and are not producer records.
+record to the process stdout descriptor, independently of logrus formatting
+or level. The Go writer uses a raw write syscall, not `os.Stdout.Write`'s
+process-terminating descriptor-1 EPIPE policy. A closed pipe returns a sink error
+and permanently disables evidence; it does not raise a software SIGPIPE, change
+the host's signal disposition, close/duplicate stdout, or retry the record.
+Other host log lines may share stdout and are not producer records; their signal
+and blocking behavior is not changed.
 The plugin opens **no diagnostic file**, declares `sources: ["stdout"]` and
 `file_logging: "not_configured"` at startup, and has no file-output configuration.
 If the host duplicates stdout into a file, that is an externally declared
@@ -146,8 +151,11 @@ managed worktrees and symlinked paths to the same worktree remain supported. It 
 HEAD tree, modified status, archive hash, extracted-library hash and schema hash.
 Harness-only `.claude` configuration is excluded from the modified check; all
 other nonignored tracked/untracked files count. A dirty build is component
-output, not a clean source artifact. Clean source must remain clean through the
-build. These are correspondence hints, **not a signed build attestation or
+output, not a clean source artifact. Both pre-build and post-build Git status
+commands must succeed, including for an initially dirty build. An unreadable or
+corrupt index aborts before build at the first check, or before publishing any
+archive/checksums/provenance at the second check. Clean source must remain clean
+through the build. These are correspondence hints, **not a signed build attestation or
 reproducible rebuild**. Bind the actual source archive and candidate image hashes
 in the integration package too. A version string alone proves no identity.
 Test examples are unstamped and deliberately not acceptable as source-bound

@@ -27,15 +27,23 @@ trap 'rm -rf -- "$scratch"' EXIT
 revision=$(git -C "$root" rev-parse --verify HEAD)
 tree=$(git -C "$root" rev-parse 'HEAD^{tree}')
 [[ "$revision" =~ ^[0-9a-f]{40}$ && "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
+source_status=$(git -C "$root" status --porcelain --untracked-files=all -- . ':!.claude') || {
+  echo 'Cannot inspect source cleanliness before build' >&2
+  exit 1
+}
 modified=true
-if [[ -z "$(git -C "$root" status --porcelain --untracked-files=all -- . ':!.claude')" ]]; then
+if [[ -z "$source_status" ]]; then
   modified=false
 fi
 CGO_ENABLED=1 GOOS=linux GOARCH=amd64 "$go_bin" -C "$root" build -buildvcs=false -trimpath \
   -ldflags "-X main.replayBuildRevision=$revision -X main.replayBuildModified=$modified" \
   -buildmode=c-shared -o "$scratch/meta.so" .
 [[ "$(git -C "$root" rev-parse HEAD)" == "$revision" ]] || { echo 'Source revision changed during build' >&2; exit 1; }
-if [[ "$modified" == false && -n "$(git -C "$root" status --porcelain --untracked-files=all -- . ':!.claude')" ]]; then
+source_status=$(git -C "$root" status --porcelain --untracked-files=all -- . ':!.claude') || {
+  echo 'Cannot inspect source cleanliness after build' >&2
+  exit 1
+}
+if [[ "$modified" == false && -n "$source_status" ]]; then
   echo 'Clean source changed during build' >&2
   exit 1
 fi

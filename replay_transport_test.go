@@ -1,16 +1,77 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// Use a separate process: a real descriptor-1 EPIPE can kill the entire host.
+// Do not ignore/reset SIGPIPE here; exercise the Go host's default policy.
+func TestReplayEvidenceClosedStdout(t *testing.T) {
+	if phase := os.Getenv("META_CLOSED_STDOUT_CHILD"); phase != "" {
+		read, write, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer read.Close()
+		if err := syscall.Dup2(int(write.Fd()), syscall.Stdout); err != nil {
+			t.Fatal(err)
+		}
+		write.Close()
+		if phase == "startup" {
+			read.Close()
+		}
+		e := evidenceExecutor(t, replayStdoutWriter{})
+		if phase != "startup" {
+			line, err := bufio.NewReader(read).ReadString('\n')
+			if err != nil || !strings.Contains(line, "replay-producer-startup-v1") {
+				t.Fatalf("startup: %v: %s", err, line)
+			}
+			read.Close()
+			runEvidenceRequest(t, e, evidenceRequest([]byte(`{"input":[]}`), phase == "stream", &evidenceHTTPClient{}))
+		}
+		awaitEvidence(t, e.evidence.done, "real broken-pipe writer failure")
+		if !e.evidence.failed || !e.evidence.closed {
+			t.Fatal("broken stdout did not permanently seal admission")
+		}
+		sequence := e.evidence.sequence
+		for _, stream := range []bool{false, true} {
+			runEvidenceRequest(t, e, evidenceRequest([]byte(`{"input":[]}`), stream, &evidenceHTTPClient{}))
+		}
+		if e.evidence.sequence != sequence {
+			t.Fatal("broken stdout restarted evidence")
+		}
+		fmt.Fprintln(os.Stderr, "survived closed stdout")
+		// The testing runner must not write its own PASS to the closed stdout.
+		if err := syscall.Dup2(syscall.Stderr, syscall.Stdout); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	for _, phase := range []string{"startup", "nonstream", "stream"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReplayEvidenceClosedStdout$", "-test.timeout=5s")
+			cmd.Env = append(os.Environ(), "META_CLOSED_STDOUT_CHILD="+phase)
+			out, err := cmd.CombinedOutput()
+			if err != nil || !bytes.Contains(out, []byte("survived closed stdout")) {
+				t.Fatalf("closed stdout must not kill host: %v\n%s", err, out)
+			}
+		})
+	}
+}
 
 // Release and join every stalled writer, even when the regression fails.
 type stalledEvidenceWriter struct {

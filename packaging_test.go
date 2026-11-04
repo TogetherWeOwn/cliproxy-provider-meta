@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReleaseRejectsEnclosingRepository(t *testing.T) {
@@ -64,6 +66,98 @@ func TestReleaseRejectsEnclosingRepository(t *testing.T) {
 	raw, err = cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(raw), "BUILD REACHED") || strings.Contains(string(raw), "Source root is not") {
 		t.Fatalf("standalone source did not pass provenance gate: %v\n%s", err, raw)
+	}
+}
+
+func TestReleaseRejectsGitStatusFailure(t *testing.T) {
+	for _, phase := range []string{"before", "after-clean", "after-modified"} {
+		t.Run(phase, func(t *testing.T) {
+			root := t.TempDir()
+			for _, file := range []string{"scripts/package-release.sh", "registry.json", "LICENSE", "docs/replay-event-v1.schema.json"} {
+				data, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(root, file)
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Fixture", "-c", "user.email=fixture.invalid", "commit", "-qm", "fixture"}} {
+				cmd := exec.Command("git", args...)
+				cmd.Dir = root
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("fixture: %v\n%s", err, out)
+				}
+			}
+			if phase == "before" {
+				if err := os.WriteFile(filepath.Join(root, ".git/index"), []byte("corrupt index"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else if phase == "after-modified" {
+				if err := os.WriteFile(filepath.Join(root, "untracked"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bin := t.TempDir()
+			// Simulate a successful build that corrupts the index before revalidation.
+			build := `#!/bin/sh
+set -eu
+printf 'BUILD REACHED\n' >&2
+root=$2
+while [ "$1" != -o ]; do shift; done
+printf 'void cliproxy_plugin_init(void) {}' | cc -shared -x c - -o "$2"
+printf 'corrupt index' > "$root/.git/index"
+`
+			if err := os.WriteFile(filepath.Join(bin, "go"), []byte(build), 0700); err != nil {
+				t.Fatal(err)
+			}
+			out := t.TempDir()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "bash", filepath.Join(root, "scripts/package-release.sh"), out)
+			cmd.Env = append(os.Environ(), "GO="+filepath.Join(bin, "go"))
+			raw, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(raw), "Cannot inspect source cleanliness") {
+				t.Fatalf("Git status failure must refuse packaging: %v\n%s", err, raw)
+			}
+			if strings.Contains(string(raw), "BUILD REACHED") != (phase != "before") {
+				t.Fatalf("Git failure did not stop at the required boundary: %s", raw)
+			}
+			entries, err := os.ReadDir(out)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("failed status published package/checksums/provenance: %v %v", entries, err)
+			}
+		})
+	}
+}
+
+func verifyNativeReplayStdout(t *testing.T, library string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	header, err := exec.CommandContext(ctx, "go", "list", "-f", "{{.Dir}}", "github.com/TogetherWeOwn/cliproxy-provider-kit/cabi").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := filepath.Join(t.TempDir(), "pipe-host")
+	cmd := exec.CommandContext(ctx, "cc", "testdata/replay_pipe_host.c", "-I", strings.TrimSpace(string(header)), "-ldl", "-o", host)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("native fixture: %v\n%s", err, out)
+	}
+	for _, broken := range []bool{false, true} {
+		args := []string{library}
+		if broken {
+			args = append(args, "closed")
+		}
+		cmd := exec.CommandContext(ctx, host, args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "native host survived startup") || (!broken && !strings.Contains(string(out), "replay-producer-startup-v1")) {
+			t.Fatalf("native packaged library, broken=%v: %v\n%s", broken, err, out)
+		}
 	}
 }
 
@@ -149,6 +243,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 			if err != nil || strings.Contains(string(info), "vcs.revision=") {
 				t.Fatalf("automatic VCS stamping may misbind a nested worktree: %v\n%s", err, info)
 			}
+			verifyNativeReplayStdout(t, extractedPath)
 		}
 		if strings.Contains(f.Name, "/") || strings.HasSuffix(f.Name, ".h") {
 			t.Fatalf("unexpected archive entry %q", f.Name)
