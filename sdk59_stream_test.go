@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -86,6 +87,80 @@ func TestSDK59ConcurrentFragmentedInterleaving(t *testing.T) {
 		if finishes != 1 {
 			t.Fatalf("stream %d terminal count=%d", i, finishes)
 		}
+	}
+}
+
+func TestSDK59PumpCancellation(t *testing.T) {
+	for _, blockedOutput := range []bool{false, true} {
+		t.Run(fmt.Sprint(blockedOutput), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			in := make(chan pluginapi.HTTPStreamChunk, 1)
+			defer close(in)
+			out := make(chan pluginapi.ExecutorStreamChunk)
+			if blockedOutput {
+				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"unread\"}\n")}
+			}
+			done := make(chan struct{})
+			go func() {
+				pumpMetaStream(ctx, newMetaExecutor(nil, nil), pluginapi.ExecutorRequest{}, &preparedMetaRequest{responseFormat: sdktranslator.FormatCodex, replay: parityReplay("auth-cancel", "")}, in, out)
+				close(done)
+			}()
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("pump did not stop on cancellation with upstream still open")
+			}
+		})
+	}
+}
+
+func TestSDK59PumpTerminalErrors(t *testing.T) {
+	for _, kind := range []string{"completed", "incomplete", "failed", "error", "transport"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			in := make(chan pluginapi.HTTPStreamChunk, 3)
+			out := make(chan pluginapi.ExecutorStreamChunk, 10)
+			isError := kind == "failed" || kind == "error" || kind == "transport"
+			switch kind {
+			case "failed":
+				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":500,\"message\":\"terminal boom\"}}}\n")}
+			case "error":
+				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"error\",\"error\":{\"code\":500,\"message\":\"terminal boom\"}}\n")}
+			case "transport":
+				in <- pluginapi.HTTPStreamChunk{Err: errors.New("terminal boom")}
+			default:
+				in <- pluginapi.HTTPStreamChunk{Payload: []byte(fmt.Sprintf("data: {\"type\":\"response.%s\",\"response\":{\"status\":%q,\"output\":[]}}\n", kind, kind))}
+			}
+			if isError {
+				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"must-not-escape\"}\n")}
+			}
+			close(in)
+			go pumpMetaStream(ctx, newMetaExecutor(nil, nil), pluginapi.ExecutorRequest{}, &preparedMetaRequest{responseFormat: sdktranslator.FormatCodex, replay: parityReplay("auth-terminal", "")}, in, out)
+			chunks, failures := 0, 0
+			for {
+				select {
+				case chunk, ok := <-out:
+					if !ok {
+						if chunks != 1 || (isError && failures != 1) || (!isError && failures != 0) {
+							t.Fatalf("chunks=%d errors=%d", chunks, failures)
+						}
+						return
+					}
+					chunks++
+					if chunk.Err != nil {
+						failures++
+						if !strings.Contains(chunk.Err.Error(), "terminal boom") {
+							t.Fatalf("upstream message lost: %v", chunk.Err)
+						}
+					}
+				case <-ctx.Done():
+					t.Fatal("terminal pump did not close")
+				}
+			}
+		})
 	}
 }
 

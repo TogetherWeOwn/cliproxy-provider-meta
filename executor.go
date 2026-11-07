@@ -413,7 +413,18 @@ func pumpMetaStream(ctx context.Context, e *metaExecutor, req pluginapi.Executor
 	// would translate the fragment as truncated JSON; instead the trailing
 	// partial line is carried into the next chunk.
 	var carry []byte
-	for chunk := range in {
+readChunks:
+	for {
+		var chunk pluginapi.HTTPStreamChunk
+		select {
+		case <-ctx.Done():
+			return
+		case next, ok := <-in:
+			if !ok {
+				break readChunks
+			}
+			chunk = next
+		}
 		if chunk.Err != nil {
 			select {
 			case out <- pluginapi.ExecutorStreamChunk{Err: providerkit.MapError(chunk.Err)}:

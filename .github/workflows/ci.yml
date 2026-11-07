@@ -69,6 +69,19 @@ jobs:
           cat "$TMPDIR/contributor-baseline.log"
           test "$result" -ne 0
           grep -q 'contributor keys/values = 1/1, want opt-in=false' "$TMPDIR/contributor-baseline.log"
+      - name: Pre-fix idle stream cancellation must fail
+        run: |
+          git fetch --no-tags origin 580bf8f7f54438585c2cb35e666e4310fa229009
+          mkdir "$TMPDIR/stream-baseline"
+          git archive 580bf8f7f54438585c2cb35e666e4310fa229009 | tar -x -C "$TMPDIR/stream-baseline"
+          cp sdk59_stream_test.go "$TMPDIR/stream-baseline/"
+          set +e
+          go -C "$TMPDIR/stream-baseline" test -count=1 -run '^TestSDK59PumpCancellation$/^false$' . > "$TMPDIR/stream-baseline.log" 2>&1
+          result=$?
+          set -e
+          cat "$TMPDIR/stream-baseline.log"
+          test "$result" -ne 0
+          grep -q 'pump did not stop on cancellation with upstream still open' "$TMPDIR/stream-baseline.log"
       - name: Secret scan
         run: |
           go install github.com/zricethezav/gitleaks/v8@v8.24.3
@@ -86,6 +99,7 @@ jobs:
             ${{ env.TMPDIR }}/library-modules.txt
             ${{ env.TMPDIR }}/toolchain.txt
             ${{ env.TMPDIR }}/contributor-baseline.log
+            ${{ env.TMPDIR }}/stream-baseline.log
           if-no-files-found: error
           retention-days: 14
       - name: Remove scratch directory

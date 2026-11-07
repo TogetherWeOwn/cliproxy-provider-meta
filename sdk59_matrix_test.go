@@ -196,6 +196,89 @@ func TestSDK59CustomToolRoundTrips(t *testing.T) {
 	}
 }
 
+func TestSDK59DeferredEagerLongNameCollision(t *testing.T) {
+	eager := "mcp__shared-long-server-11111111-2222-3333-4444-555555555555_deliver_final_subagent_handback_report"
+	deferred := "mcp__shared-long-server-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_deliver_final_subagent_handback_report"
+	tool := func(name string, deferLoading bool) string {
+		return fmt.Sprintf(`{"name":%q,"defer_loading":%t,"input_schema":{"type":"object"}}`, name, deferLoading)
+	}
+	messages := fmt.Sprintf(`[{"role":"user","content":"discover"},{"role":"assistant","content":[{"type":"tool_use","id":"search","name":"ToolSearch","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"search","content":[{"type":"tool_reference","tool_name":%q},{"type":"tool_reference","tool_name":%q}]}]},{"role":"assistant","content":[{"type":"tool_use","id":"later","name":%q,"input":{}}]}]`, deferred, deferred, deferred)
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			var eagerName string
+			for _, tools := range []string{tool("ToolSearch", false) + "," + tool(eager, false), tool("ToolSearch", false) + "," + tool(deferred, true) + "," + tool(eager, false)} {
+				payload := []byte(`{"tools":[` + tools + `],"messages":` + messages + `}`)
+				client := &contributorHTTPClient{}
+				executeContributorRequest(t, translatePathRequest("claude", payload, stream, client), stream)
+				body := client.calls[0].Body
+				got := gjson.GetBytes(body, "tools.1.name").String()
+				if eagerName == "" {
+					eagerName = got
+					continue
+				}
+				if got == "" || got != eagerName {
+					t.Fatalf("discovery renamed eager tool %q to %q: %s", eagerName, got, body)
+				}
+				var short, called string
+				declarations := 0
+				for _, item := range gjson.GetBytes(body, "input").Array() {
+					if item.Get("type").String() == "additional_tools" {
+						declarations++
+						if len(item.Get("tools").Array()) != 1 {
+							t.Fatalf("duplicate discovered declaration: %s", item.Raw)
+						}
+						short = item.Get("tools.0.name").String()
+					}
+					if item.Get("call_id").String() == "later" {
+						called = item.Get("name").String()
+					}
+				}
+				if declarations != 1 || short == "" || short == eagerName || len(short) > 64 || called != short {
+					t.Fatalf("collision mapping lost: eager=%q deferred=%q called=%q: %s", eagerName, short, called, body)
+				}
+			}
+		})
+	}
+}
+
+func TestSDK59GeminiProviderPath(t *testing.T) {
+	payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}`)
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			client := &sdk59HTTPClient{response: func(req pluginapi.HTTPRequest) string { return translatePathUpstreamSSE }}
+			req := translatePathRequest("gemini", payload, stream, client)
+			e := newMetaExecutor(nil, nil)
+			var text strings.Builder
+			if stream {
+				resp, err := e.ExecuteStream(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for chunk := range resp.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					line := strings.TrimSpace(strings.TrimPrefix(string(chunk.Payload), "data: "))
+					for _, part := range gjson.Get(line, "candidates.0.content.parts").Array() {
+						text.WriteString(part.Get("text").String())
+					}
+				}
+			} else {
+				resp, err := e.Execute(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, part := range gjson.GetBytes(resp.Payload, "candidates.0.content.parts").Array() {
+					text.WriteString(part.Get("text").String())
+				}
+			}
+			if text.String() != "pong" || len(client.calls) != 1 || !strings.Contains(gjson.GetBytes(client.calls[0].Body, "input").Raw, "ping") {
+				t.Fatalf("Gemini provider round trip: text=%q calls=%v", text.String(), client.calls)
+			}
+		})
+	}
+}
+
 func TestSDK59RegisteredMultipartRoutes(t *testing.T) {
 	// Registry-only routes are not Meta's Codex upstream path. Exercise the .59
 	// multipart fix explicitly, without claiming provider inference coverage.
@@ -212,6 +295,31 @@ func TestSDK59RegisteredMultipartRoutes(t *testing.T) {
 			}
 			if got := gjson.GetBytes(out, "choices.0.message.reasoning_content").String(); got != "reason-onereason-two" {
 				t.Fatalf("multipart reasoning=%q: %s", got, out)
+			}
+			for _, split := range []bool{false, true} {
+				events := []string{payload}
+				if split {
+					events = nil
+					for _, parts := range []string{`[{"text":"first"},{"thought":true,"text":"reason-one"}]`, `[{"text":"second"},{"thought":true,"text":"reason-two"}]`} {
+						event := `{"candidates":[{"content":{"role":"model","parts":` + parts + `}}]}`
+						if from.String() == "antigravity" {
+							event = `{"response":` + event + `}`
+						}
+						events = append(events, event)
+					}
+				}
+				var streamState any
+				var text, reasoning strings.Builder
+				for _, event := range events {
+					for _, chunk := range sdktranslator.TranslateStream(context.Background(), from, sdktranslator.FromString("openai"), "muse-spark-1.3", nil, nil, []byte("data: "+event), &streamState) {
+						line := strings.TrimSpace(strings.TrimPrefix(string(chunk), "data: "))
+						text.WriteString(gjson.Get(line, "choices.0.delta.content").String())
+						reasoning.WriteString(gjson.Get(line, "choices.0.delta.reasoning_content").String())
+					}
+				}
+				if text.String() != gjson.GetBytes(out, "choices.0.message.content").String() || reasoning.String() != gjson.GetBytes(out, "choices.0.message.reasoning_content").String() {
+					t.Fatalf("split=%t stream differs: text=%q reasoning=%q", split, text.String(), reasoning.String())
+				}
 			}
 		})
 	}
