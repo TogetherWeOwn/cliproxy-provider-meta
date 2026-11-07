@@ -82,6 +82,19 @@ jobs:
           cat "$TMPDIR/stream-baseline.log"
           test "$result" -ne 0
           grep -q 'pump did not stop on cancellation with upstream still open' "$TMPDIR/stream-baseline.log"
+      - name: Pre-fix nested errors and Gemini carrier replay must fail
+        run: |
+          cp contributor_transport_test.go sdk59_replay_test.go "$TMPDIR/stream-baseline/"
+          : > "$TMPDIR/replay-baseline.log"
+          for regression in TestSDK59PumpTerminalErrors TestContributorRetryTransport TestSDK59GeminiCarrierReplay; do
+            set +e
+            go -C "$TMPDIR/stream-baseline" test -count=1 -run "^${regression}$" . > "$TMPDIR/regression.log" 2>&1
+            result=$?
+            set -e
+            cat "$TMPDIR/regression.log" | tee -a "$TMPDIR/replay-baseline.log"
+            test "$result" -ne 0
+            grep -q -- "--- FAIL: $regression" "$TMPDIR/regression.log"
+          done
       - name: Secret scan
         run: |
           go install github.com/zricethezav/gitleaks/v8@v8.24.3
@@ -100,6 +113,7 @@ jobs:
             ${{ env.TMPDIR }}/toolchain.txt
             ${{ env.TMPDIR }}/contributor-baseline.log
             ${{ env.TMPDIR }}/stream-baseline.log
+            ${{ env.TMPDIR }}/replay-baseline.log
           if-no-files-found: error
           retention-days: 14
       - name: Remove scratch directory

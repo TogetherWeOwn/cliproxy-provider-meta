@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -155,14 +156,27 @@ func prefilterClaudePayload(payload []byte, replay metaReasoningReplay) []byte {
 	return out
 }
 
-// prefilterGeminiPayload filters Gemini thought signatures. Both spellings the
-// SDK reads (thoughtSignature and thought_signature) are handled; dropped ones
-// lose the field.
+// The stock Codex/Gemini translator wraps signatures for Gemini's bytes field.
+// This is a wire carrier only; the decoded value still needs account attribution
+// and the translated-body native-envelope sanitizer.
+const metaGeminiSignatureCarrier = "cpa-codex-gemini-carrier-v1:"
+
+// prefilterGeminiPayload filters raw and SDK-carried Gemini thought signatures.
+// Both spellings the SDK reads are handled; dropped ones lose the field.
 func prefilterGeminiPayload(payload []byte, replay metaReasoningReplay) []byte {
 	out := payload
 	changed := false
 	for _, path := range geminiThoughtSignaturePaths(payload) {
-		raw := gjson.GetBytes(out, path).String()
+		raw := strings.TrimSpace(gjson.GetBytes(out, path).String())
+		carried := false
+		// Bound decoding by the existing native signature cap plus tag/carrier
+		// overhead. Unrecognized or nested carriers never gain attribution.
+		if len(raw) <= base64.StdEncoding.EncodedLen(MaxMetaReasoningSignatureLen+128) {
+			if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && strings.HasPrefix(string(decoded), metaGeminiSignatureCarrier) {
+				raw = strings.TrimSpace(string(decoded[len(metaGeminiSignatureCarrier):]))
+				carried = true
+			}
+		}
 		if _, _, tagged := ParseMetaReasoningTag(raw); !tagged {
 			continue
 		}
@@ -171,7 +185,11 @@ func prefilterGeminiPayload(payload []byte, replay metaReasoningReplay) []byte {
 			if decision.replay == raw {
 				continue
 			}
-			next, err := sjson.SetBytes(out, path, decision.replay)
+			value := decision.replay
+			if carried {
+				value = base64.StdEncoding.EncodeToString([]byte(metaGeminiSignatureCarrier + value))
+			}
+			next, err := sjson.SetBytes(out, path, value)
 			if err != nil {
 				continue
 			}

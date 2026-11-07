@@ -504,7 +504,7 @@ func peekMetaStreamBootstrap(ctx context.Context, in <-chan pluginapi.HTTPStream
 						continue
 					}
 					retry := metaStreamEventError(eventData) != nil &&
-						isMetaReasoningNotIssued(400, []byte(gjson.GetBytes(eventData, "error.message").String()))
+						isMetaReasoningNotIssuedFailure(eventData)
 					rewound := make(chan pluginapi.HTTPStreamChunk, len(peeked)+8)
 					for _, c := range peeked {
 						rewound <- c
@@ -1065,7 +1065,7 @@ func metaStreamEventError(eventData []byte) error {
 // metaStreamEventStatus extracts the HTTP status a stream error event names,
 // defaulting to 502 when it names none.
 func metaStreamEventStatus(eventData []byte) int {
-	if code := int(gjson.GetBytes(eventData, "error.code").Int()); code >= 400 && code <= 599 {
+	if code := int(metaUpstreamErrorField(eventData, "code").Int()); code >= 400 && code <= 599 {
 		return code
 	}
 	return http.StatusBadGateway
@@ -1074,7 +1074,7 @@ func metaStreamEventStatus(eventData []byte) int {
 // metaStreamEventMessage extracts the message a stream error event carries for
 // retry matching, falling back to the raw event when it carries none.
 func metaStreamEventMessage(eventData []byte) []byte {
-	if msg := gjson.GetBytes(eventData, "error.message").String(); msg != "" {
+	if msg := metaUpstreamErrorField(eventData, "message").String(); msg != "" {
 		return []byte(msg)
 	}
 	return eventData

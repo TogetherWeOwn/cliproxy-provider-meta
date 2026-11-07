@@ -16,9 +16,10 @@ import (
 // This file intentionally uses only the released executor API and fixtures, so
 // Actions can run the same transport regression against the pre-fix release.
 type contributorHTTPClient struct {
-	calls       []pluginapi.HTTPRequest
-	rejectFirst bool
-	bootstrap   bool
+	calls         []pluginapi.HTTPRequest
+	rejectFirst   bool
+	bootstrap     bool
+	nestedFailure bool
 }
 
 func (f *contributorHTTPClient) record(req pluginapi.HTTPRequest) {
@@ -44,6 +45,9 @@ func (f *contributorHTTPClient) DoStream(_ context.Context, req pluginapi.HTTPRe
 		if f.bootstrap {
 			status = 200
 			body = "data: {\"type\":\"error\",\"error\":{\"message\":\"reasoning encrypted_content was not issued to this caller\"}}\n\n"
+			if f.nestedFailure {
+				body = "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"reasoning encrypted_content was not issued to this caller\"}}}\n\n"
+			}
 		}
 	}
 	ch := make(chan pluginapi.HTTPStreamChunk, len(body))
@@ -145,14 +149,14 @@ func TestContributorTransportMatrix(t *testing.T) {
 
 func TestContributorRetryTransport(t *testing.T) {
 	for _, stream := range []bool{false, true} {
-		for _, bootstrap := range []bool{false, true} {
+		for _, bootstrap := range []string{"http", "error", "failed"} {
 			for _, contributor := range []bool{false, true} {
-				t.Run(fmt.Sprintf("stream=%t/bootstrap=%t/contributor=%t", stream, bootstrap, contributor), func(t *testing.T) {
+				t.Run(fmt.Sprintf("stream=%t/bootstrap=%s/contributor=%t", stream, bootstrap, contributor), func(t *testing.T) {
 					model := "muse-spark-1.3"
 					if contributor {
 						model += "-contributor"
 					}
-					client := &contributorHTTPClient{rejectFirst: true, bootstrap: bootstrap}
+					client := &contributorHTTPClient{rejectFirst: true, bootstrap: bootstrap != "http", nestedFailure: bootstrap == "failed"}
 					payload := []byte(`{"model":` + strconv.Quote(model) + `,"input":[{"type":"reasoning","encrypted_content":` + strconv.Quote(parityEnvelope(t)) + `}]}`)
 					req := translatePathRequest("codex", payload, stream, client)
 					req.Model = model

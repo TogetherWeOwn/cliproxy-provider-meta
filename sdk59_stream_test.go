@@ -95,17 +95,26 @@ func TestSDK59PumpCancellation(t *testing.T) {
 		t.Run(fmt.Sprint(blockedOutput), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			in := make(chan pluginapi.HTTPStreamChunk, 1)
+			in := make(chan pluginapi.HTTPStreamChunk)
 			defer close(in)
-			out := make(chan pluginapi.ExecutorStreamChunk)
-			if blockedOutput {
-				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"unread\"}\n")}
-			}
+			out := make(chan pluginapi.ExecutorStreamChunk, 1)
 			done := make(chan struct{})
 			go func() {
 				pumpMetaStream(ctx, newMetaExecutor(nil, nil), pluginapi.ExecutorRequest{}, &preparedMetaRequest{responseFormat: sdktranslator.FormatCodex, replay: parityReplay("auth-cancel", "")}, in, out)
 				close(done)
 			}()
+			if blockedOutput {
+				// The second unbuffered receive proves the first event was
+				// emitted into the one-slot output. Processing the second
+				// event must now cancel its send, not its input receive.
+				for i := 0; i < 2; i++ {
+					select {
+					case in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"unread\"}\n")}:
+					case <-time.After(2 * time.Second):
+						t.Fatal("pump did not receive event before cancellation")
+					}
+				}
+			}
 			cancel()
 			select {
 			case <-done:
