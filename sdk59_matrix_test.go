@@ -166,7 +166,13 @@ func TestSDK59CustomToolRoundTrips(t *testing.T) {
 								args += call.Get("function.arguments").String()
 							}
 						}
-						if callID != "call_patch" || callName != name || args != "patch text" {
+						wantArgs := "patch text"
+						if name == "apply_patch" {
+							// Stock .59 exposes this custom tool as a JSON-input
+							// function to Chat clients, then unwraps it on replay.
+							wantArgs = `{"input":"patch text"}`
+						}
+						if callID != "call_patch" || callName != name || args != wantArgs {
 							t.Fatalf("stream=%t restored %q/%q/%q", stream, callID, callName, args)
 						}
 						// Feed the restored response and result into the next request.
@@ -180,7 +186,7 @@ func TestSDK59CustomToolRoundTrips(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						if gjson.GetBytes(prepared.body, "input.0.type").String() != "custom_tool_call" || gjson.GetBytes(prepared.body, "input.0.input").String() != args || gjson.GetBytes(prepared.body, "input.1.type").String() != "custom_tool_call_output" || gjson.GetBytes(prepared.body, "input.1.call_id").String() != callID {
+						if gjson.GetBytes(prepared.body, "input.0.type").String() != "custom_tool_call" || gjson.GetBytes(prepared.body, "input.0.input").String() != "patch text" || gjson.GetBytes(prepared.body, "input.1.type").String() != "custom_tool_call_output" || gjson.GetBytes(prepared.body, "input.1.call_id").String() != callID {
 							t.Fatalf("follow-up lost custom identity/result: %s", prepared.body)
 						}
 					}
