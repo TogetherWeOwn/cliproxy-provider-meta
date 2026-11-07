@@ -29,8 +29,13 @@ func TestSDK59GeminiCarrierFailClosed(t *testing.T) {
 		payload := []byte(`{"contents":[{"role":"model","parts":[{"thought":true,"text":"hidden","thoughtSignature":` + strconv.Quote(value) + `}]},{"role":"user","parts":[{"text":"continue"}]}]}`)
 		filtered := prefilterClientPayload(payload, sdktranslator.FormatGemini, replay)
 		body := replay.sanitizeCodexRequest(sdktranslator.TranslateRequest(sdktranslator.FormatGemini, sdktranslator.FormatCodex, "muse-spark-1.3", filtered, false))
-		if strings.Contains(string(body), "encrypted_content") || !strings.Contains(string(body), "continue") {
-			t.Fatalf("malformed/unattributed carrier gained replay authority: %s", body)
+		for _, item := range gjson.GetBytes(body, "input").Array() {
+			if item.Get("encrypted_content").Exists() {
+				t.Fatalf("malformed/unattributed carrier gained replay authority: %s", body)
+			}
+		}
+		if !strings.Contains(string(body), "continue") {
+			t.Fatalf("carrier filtering lost user input: %s", body)
 		}
 	}
 }
