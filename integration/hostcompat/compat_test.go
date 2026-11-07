@@ -25,7 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// The actual v8.0.49 loader performs dlopen, C-ABI registration, RPC dispatch
+// The actual stock v8.0.59 loader performs dlopen, C-ABI registration, RPC dispatch
 // and quota routing. Only the upstream is an httptest mock: it serves the key
 // envelope path the plugin polls.
 func TestRealHostLoader(t *testing.T) {
@@ -114,7 +114,7 @@ func TestRealHostLoader(t *testing.T) {
 		t.Fatalf("executor candidate missing: %+v", host.RegisteredPlugins())
 	}
 	info := host.RegisteredPlugins()
-	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.4" {
+	if len(info) != 1 || !info[0].SupportsQuota || info[0].Metadata.Version != "0.2.5" {
 		t.Fatalf("metadata %+v", info)
 	}
 	if prebuilt != "" {
@@ -148,7 +148,7 @@ func TestRegistryUsesNativeStoreSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := pluginstore.ParseRegistry(raw)
-	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "meta" || reg.Plugins[0].Version != "0.2.4" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
+	if err != nil || reg.SchemaVersion != 1 || len(reg.Plugins) != 1 || reg.Plugins[0].ID != "meta" || reg.Plugins[0].Version != "0.2.5" || pluginstore.PluginInstallType(reg.Plugins[0]) != "github-release" {
 		t.Fatalf("registry %+v %v", reg, err)
 	}
 }

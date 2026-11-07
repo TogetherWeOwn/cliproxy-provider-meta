@@ -181,7 +181,7 @@ func (e *metaExecutor) Execute(ctx context.Context, req pluginapi.ExecutorReques
 		resp, err := req.HTTPClient.Do(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     url,
-			Headers: metaUpstreamHeaders(token, false, req.Headers),
+			Headers: metaInferenceHeaders(token, false, req.Headers, prepared.body),
 			Body:    prepared.body,
 		})
 		if err != nil {
@@ -251,7 +251,7 @@ func (e *metaExecutor) ExecuteStream(ctx context.Context, req pluginapi.Executor
 		stream, err := req.HTTPClient.DoStream(ctx, pluginapi.HTTPRequest{
 			Method:  http.MethodPost,
 			URL:     url,
-			Headers: metaUpstreamHeaders(token, true, req.Headers),
+			Headers: metaInferenceHeaders(token, true, req.Headers, prepared.body),
 			Body:    prepared.body,
 		})
 		if err != nil {
@@ -680,6 +680,13 @@ func (e *metaExecutor) HttpRequest(ctx context.Context, req pluginapi.ExecutorHT
 	}
 	mergeMetaClientHeaders(headers, req.Headers)
 	applyMetaClientIdentity(headers)
+	// Only the resolved inference endpoint has a model-bearing raw contract.
+	// Auth, model-less and ambiguous routes never opt in, even with a body.
+	var inferenceBody []byte
+	if req.Method == http.MethodPost && target.String() == strings.TrimSuffix(baseURL, "/")+"/responses" {
+		inferenceBody = req.Body
+	}
+	applyMetaContributorMode(headers, inferenceBody)
 	resp, err := req.HTTPClient.Do(ctx, pluginapi.HTTPRequest{
 		Method:  req.Method,
 		URL:     req.URL,
@@ -803,7 +810,53 @@ func applyMetaClientIdentity(headers http.Header) {
 	headers.Set("X-Tbh-Thread-Id", sessionID)
 	headers.Set("X-Tbh-Root-Session-Id", sessionID)
 	headers.Set("X-Tbh-Agent-Role", "main")
-	headers.Set("X-Tbh-Contributor-Mode", "1")
+}
+
+// metaInferenceHeaders finalizes opt-in after all identity/client headers, using
+// the exact body sent on this attempt (including a reasoning-removal retry).
+func metaInferenceHeaders(token string, stream bool, clientHeaders http.Header, body []byte) http.Header {
+	headers := metaUpstreamHeaders(token, stream, clientHeaders)
+	applyMetaContributorMode(headers, body)
+	return headers
+}
+
+// applyMetaContributorMode is independent of session creation. Delete every
+// spelling and value first: Header.Del alone misses noncanonical map keys.
+// Duplicate model fields and malformed/model-less bodies fail closed.
+func applyMetaContributorMode(headers http.Header, body []byte) {
+	const name = "X-Tbh-Contributor-Mode"
+	for key := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), name) {
+			delete(headers, key)
+		}
+	}
+	if !gjson.ValidBytes(body) {
+		return
+	}
+	root := gjson.ParseBytes(body)
+	if !root.IsObject() {
+		return
+	}
+	var model gjson.Result
+	modelFields := 0
+	root.ForEach(func(key, value gjson.Result) bool {
+		if key.String() == "model" {
+			modelFields++
+			model = value
+		}
+		return true
+	})
+	if modelFields != 1 || model.Type != gjson.String {
+		return
+	}
+	base := parseMetaReasoningModelSuffix(strings.TrimSpace(model.String()))
+	// A second or unmatched suffix is ambiguous, not a contributor model.
+	if strings.ContainsAny(base, "()") {
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(base)), "-contributor") {
+		headers.Set(name, "1")
+	}
 }
 
 // filterMetaEgressHeaders drops upstream X-Meta-* subscription headers before
