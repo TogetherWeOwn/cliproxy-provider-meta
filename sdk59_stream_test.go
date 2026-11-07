@@ -117,17 +117,19 @@ func TestSDK59PumpCancellation(t *testing.T) {
 }
 
 func TestSDK59PumpTerminalErrors(t *testing.T) {
-	for _, kind := range []string{"completed", "incomplete", "failed", "error", "transport"} {
+	for _, kind := range []string{"completed", "incomplete", "failed", "error", "server", "transport"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			in := make(chan pluginapi.HTTPStreamChunk, 3)
 			out := make(chan pluginapi.ExecutorStreamChunk, 10)
-			isError := kind == "failed" || kind == "error" || kind == "transport"
+			isError := kind == "failed" || kind == "error" || kind == "server" || kind == "transport"
 			switch kind {
 			case "failed":
-				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":500,\"message\":\"terminal boom\"}}}\n")}
+				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":400,\"type\":\"invalid_request_error\",\"message\":\"terminal boom\"}}}\n")}
 			case "error":
+				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"error\",\"error\":{\"code\":400,\"type\":\"invalid_request_error\",\"message\":\"terminal boom\"}}\n")}
+			case "server":
 				in <- pluginapi.HTTPStreamChunk{Payload: []byte("data: {\"type\":\"error\",\"error\":{\"code\":500,\"message\":\"terminal boom\"}}\n")}
 			case "transport":
 				in <- pluginapi.HTTPStreamChunk{Err: errors.New("terminal boom")}
@@ -152,8 +154,16 @@ func TestSDK59PumpTerminalErrors(t *testing.T) {
 					chunks++
 					if chunk.Err != nil {
 						failures++
-						if !strings.Contains(chunk.Err.Error(), "terminal boom") {
-							t.Fatalf("upstream message lost: %v", chunk.Err)
+						rpcErr := unwrapMetaRPCError(t, chunk.Err)
+						if kind == "failed" || kind == "error" {
+							if rpcErr.HTTPStatus != 400 || gjson.Get(rpcErr.Message, "error.message").String() != "terminal boom" {
+								t.Fatalf("actionable rejection lost: %+v", rpcErr)
+							}
+						} else if rpcErr.Message != "plugin operation failed" {
+							t.Fatalf("server/transport details were not sanitized: %+v", rpcErr)
+						}
+						if kind == "server" && rpcErr.HTTPStatus != 500 {
+							t.Fatalf("server status lost: %+v", rpcErr)
 						}
 					}
 				case <-ctx.Done():
