@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,14 +33,28 @@ func isOpenPGP(path string) bool {
 	return path == "golang.org/x/crypto/openpgp" || strings.HasPrefix(path, "golang.org/x/crypto/openpgp/")
 }
 
+func checkResidualReplacement(oldPath, newPath string, pins map[string]string) error {
+	_, oldPinned := pins[oldPath]
+	_, newPinned := pins[newPath]
+	if oldPinned || newPinned || isOpenPGP(oldPath) || isOpenPGP(newPath) {
+		return fmt.Errorf("residual dependency replacement: %s => %s", oldPath, newPath)
+	}
+	return nil
+}
+
 func checkResidualModules(modules []dependencyModule, pins map[string]string) error {
 	seen := make(map[string]bool)
 	for _, module := range modules {
-		if isOpenPGP(module.Path) || module.Replace != nil && isOpenPGP(module.Replace.Path) {
+		if isOpenPGP(module.Path) {
 			return fmt.Errorf("unsafe OpenPGP module: %s", module.Path)
 		}
+		if module.Replace != nil {
+			if err := checkResidualReplacement(module.Path, module.Replace.Path, pins); err != nil {
+				return err
+			}
+		}
 		if want, ok := pins[module.Path]; ok {
-			if module.Version != want || module.Replace != nil {
+			if module.Version != want {
 				return fmt.Errorf("%s must be unreplaced %s, got %+v", module.Path, want, module)
 			}
 			seen[module.Path] = true
@@ -70,6 +86,12 @@ func dependencyJSON(t *testing.T, dir string, args ...string) []byte {
 func TestResidualDependencyGraphs(t *testing.T) {
 	for _, dir := range []string{".", "integration/hostcompat"} {
 		t.Run(dir, func(t *testing.T) {
+			// Child-process reads are not tracked by the Go test cache.
+			for _, name := range []string{"go.mod", "go.sum"} {
+				if _, err := os.ReadFile(filepath.Join(dir, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var manifest struct {
 				Require []dependencyModule
 				Exclude []dependencyModule
@@ -82,9 +104,8 @@ func TestResidualDependencyGraphs(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, replacement := range manifest.Replace {
-				_, pinned := residualDependencyPins[replacement.Old.Path]
-				if pinned || isOpenPGP(replacement.Old.Path) || isOpenPGP(replacement.New.Path) {
-					t.Fatalf("residual dependency replacement: %+v", replacement)
+				if err := checkResidualReplacement(replacement.Old.Path, replacement.New.Path, residualDependencyPins); err != nil {
+					t.Fatal(err)
 				}
 			}
 			for _, exclusion := range manifest.Exclude {
@@ -161,6 +182,8 @@ func TestResidualDependencyGuard(t *testing.T) {
 		"split module":  {good, {Path: crypto + "/openpgp", Version: "v0.1.0"}},
 		"split subpath": {good, {Path: crypto + "/openpgp/packet", Version: "v0.1.0"}},
 		"split target":  {good, {Path: "example.com/crypto", Replace: &dependencyModule{Path: crypto + "/openpgp"}}},
+		"alias target":  {good, {Path: "example.com/crypto", Replace: &dependencyModule{Path: crypto, Version: "v0.58.0"}}},
+		"pinned target": {good, {Path: "example.com/crypto", Replace: &dependencyModule{Path: crypto, Version: pins[crypto]}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := checkResidualModules(modules, pins); err == nil {
@@ -170,6 +193,24 @@ func TestResidualDependencyGuard(t *testing.T) {
 	}
 	if err := checkResidualModules([]dependencyModule{good, {Path: "example.com/unrelated", Version: "v1.0.0"}}, pins); err != nil {
 		t.Fatalf("unrelated dependency rejected: %v", err)
+	}
+	for name, paths := range map[string][2]string{
+		"pinned source": {crypto, "example.com/crypto"},
+		"alias target":  {"example.com/crypto", crypto},
+		"split source":  {crypto + "/openpgp", "example.com/crypto"},
+		"split target":  {"example.com/crypto", crypto + "/openpgp"},
+	} {
+		t.Run("manifest/"+name, func(t *testing.T) {
+			if err := checkResidualReplacement(paths[0], paths[1], pins); err == nil {
+				t.Fatal("unsafe manifest replacement accepted")
+			}
+		})
+	}
+	if err := checkResidualReplacement("example.com/unrelated", "example.com/other", pins); err != nil {
+		t.Fatalf("unrelated replacement rejected: %v", err)
+	}
+	if err := checkResidualModules([]dependencyModule{good, {Path: "example.com/unrelated", Replace: &dependencyModule{Path: "example.com/other"}}}, pins); err != nil {
+		t.Fatalf("unrelated graph replacement rejected: %v", err)
 	}
 	if isOpenPGP(crypto+"/ssh") || !isOpenPGP(crypto+"/openpgp/armor") {
 		t.Fatal("OpenPGP import boundary is incorrect")
