@@ -48,7 +48,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
-    uses: TogetherWeOwn/.github/.github/workflows/pr-size.yml@9ef0c1321f5ac1dd37a4cdae25b8de322f95650c
+    uses: TogetherWeOwn/.github/.github/workflows/pr-size.yml@97fc0e24038021dfaa1fc9da754c6c5d6429130f
     with:
       pr-number: ${{ inputs.pr_number || '' }}
       # This repo's generated paths, excluded on top of the script's
@@ -63,4 +63,4 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
-    uses: TogetherWeOwn/.github/.github/workflows/pr-size-weekly.yml@9ef0c1321f5ac1dd37a4cdae25b8de322f95650c
+    uses: TogetherWeOwn/.github/.github/workflows/pr-size-weekly.yml@97fc0e24038021dfaa1fc9da754c6c5d6429130f
