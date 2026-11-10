@@ -33,7 +33,7 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 	client := kit.NewQuotaHTTPClient(nil)
 	quota := newQuotaProvider(client)
 	auth := &metaAuthProvider{quota: quota}
-	models := metaModelProvider{}
+	models := newMetaModelCatalog()
 	executor := newMetaExecutor(quota, auth)
 	producer, err := newReplayProducer(replayStdoutWriter{})
 	if err != nil {
