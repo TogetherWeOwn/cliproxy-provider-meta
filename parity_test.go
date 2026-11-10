@@ -730,3 +730,25 @@ func TestParityModelsNamespaced(t *testing.T) {
 		t.Fatalf("strip = %q", got)
 	}
 }
+
+func TestStaticModelsIncludeMuseEmber(t *testing.T) {
+	resp, err := metaModelProvider{}.StaticModels(context.Background(), pluginapi.StaticModelRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, m := range resp.Models {
+		switch m.Name {
+		case "muse-ember-1.0":
+			found = true
+			if m.ID != metaMuseNamespace+"/muse-ember-1.0" || m.ContextLength != 1048576 || m.MaxCompletionTokens != 524288 {
+				t.Fatalf("muse-ember-1.0 = %+v", m)
+			}
+		case "muse-ember-1.0-contributor":
+			t.Fatal("Muse Ember has no Contributor-mode variant")
+		}
+	}
+	if !found {
+		t.Fatal("muse-ember-1.0 missing from static catalog")
+	}
+}
