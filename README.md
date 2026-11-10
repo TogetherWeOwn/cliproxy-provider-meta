@@ -24,7 +24,11 @@ The supported host baseline is **v8.0.59**; v8.0.49 compatibility is not claimed
   the fresh-success path only (a new model becomes servable when the host
   catalog gains it and the host re-invokes `ModelsForAuth`): a failed fetch
   keeps serving last-good/static until the next host event, with no bounded
-  retry and no recovery guarantee. Contributor precedence is discovered from
+  retry and no recovery guarantee. A successful fetch serves the discovered
+  list; models known only to the static list (Muse Ember, added after the
+  pinned host section) appear once the host public catalog gains them, and
+  remain in the static fallback served when discovery fails. Contributor
+  precedence is discovered from
   `-contributor` sibling ids — a base id with a contributor sibling is not
   served — and the executor strips exactly one `meta-muse/` namespace before
   sending upstream.

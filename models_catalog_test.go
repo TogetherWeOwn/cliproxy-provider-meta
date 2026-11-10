@@ -453,6 +453,26 @@ func TestMetaCatalogSizeAndDeadlineFallback(t *testing.T) {
 	}
 }
 
+// A 200 body with no usable meta entries is a failed fetch, not an empty
+// success: both catalog URLs are tried and the static fallback serves.
+func TestMetaCatalogEmptySectionFallsBack(t *testing.T) {
+	cli := &fakeMetaHostClient{status: 200, body: []byte(`{"meta":[]}`)}
+	cat := newMetaModelCatalog()
+	resp, err := cat.ModelsForAuth(context.Background(), metaCatalogAuthReq(cli, "dca:test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Models) != 6 {
+		t.Fatalf("empty section served %d models, want 6-model static fallback", len(resp.Models))
+	}
+	if n := cli.callCount(); n != 2 {
+		t.Fatalf("fetch calls = %d, want 2 (empty primary must try the fallback URL)", n)
+	}
+	if resp.Provider != metaMuseNamespace {
+		t.Fatalf("provider = %q, want %q", resp.Provider, metaMuseNamespace)
+	}
+}
+
 // Overrides apply through the uniform pipeline: a hand override rewrites a
 // known id's display/context and swaps to a contributor id.
 func TestMetaCatalogOverridesApply(t *testing.T) {
@@ -479,17 +499,19 @@ func TestMetaCatalogOverridesApply(t *testing.T) {
 }
 
 // RegisterModels and StaticModels serve the static list (not a fetch) through
-// the same pipeline.
+// the same pipeline. The requests carry the plugin's display name (what the
+// host populates req.Plugin.Name with), so this also pins that responses are
+// attributed to the credential provider, not the display name.
 func TestMetaCatalogRegisterAndStaticServeStatic(t *testing.T) {
 	cat := newMetaModelCatalog()
 	reg, err := cat.RegisterModels(context.Background(), pluginapi.ModelRegistrationRequest{
-		Plugin: pluginapi.Metadata{Name: metaMuseNamespace},
+		Plugin: pluginapi.Metadata{Name: displayName},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sta, err := cat.StaticModels(context.Background(), pluginapi.StaticModelRequest{
-		Plugin: pluginapi.Metadata{Name: metaMuseNamespace},
+		Plugin: pluginapi.Metadata{Name: displayName},
 	})
 	if err != nil {
 		t.Fatal(err)

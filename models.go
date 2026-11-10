@@ -77,13 +77,45 @@ const (
 // meta-muse. The plugin has no allow/deny globs today, so the kit default
 // (no allow = allow all, no deny) applies. The catalog implements both
 // ModelProvider and ModelRegistrar.
-func newMetaModelCatalog() *providerkit.ModelCatalog {
-	return providerkit.NewModelCatalog(providerkit.ModelCatalogConfig{
+func newMetaModelCatalog() *metaModelCatalog {
+	return &metaModelCatalog{ModelCatalog: providerkit.NewModelCatalog(providerkit.ModelCatalogConfig{
 		Namespace: metaMuseNamespace,
 		Static:    metaUpstreamModels,
 		Fetch:     fetchMetaModels,
-	})
+	})}
 }
+
+// metaModelCatalog wraps the kit ModelCatalog so every model response is
+// attributed to the plugin's credential provider (meta-muse), matching the
+// pre-migration provider. The kit catalog otherwise echoes req.Plugin.Name,
+// which for this plugin is the display name ("Meta"), not the credential
+// provider; static and registration responses must not be recorded under it.
+type metaModelCatalog struct {
+	*providerkit.ModelCatalog
+}
+
+func (c *metaModelCatalog) StaticModels(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+	resp, err := c.ModelCatalog.StaticModels(ctx, req)
+	resp.Provider = metaMuseNamespace
+	return resp, err
+}
+
+func (c *metaModelCatalog) RegisterModels(ctx context.Context, req pluginapi.ModelRegistrationRequest) (pluginapi.ModelRegistrationResponse, error) {
+	resp, err := c.ModelCatalog.RegisterModels(ctx, req)
+	resp.Provider = metaMuseNamespace
+	return resp, err
+}
+
+func (c *metaModelCatalog) ModelsForAuth(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+	resp, err := c.ModelCatalog.ModelsForAuth(ctx, req)
+	resp.Provider = metaMuseNamespace
+	return resp, err
+}
+
+var (
+	_ pluginapi.ModelProvider  = (*metaModelCatalog)(nil)
+	_ pluginapi.ModelRegistrar = (*metaModelCatalog)(nil)
+)
 
 // metaCatalogEntry is one models.json "meta" section entry. Only the fields
 // the static list carries are parsed; everything else is ignored.
@@ -173,6 +205,9 @@ func fetchMetaModelsFromURL(ctx context.Context, client pluginapi.HostHTTPClient
 			m.Thinking = &pluginapi.ThinkingSupport{Levels: e.Thinking.Levels}
 		}
 		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("model discovery response has no meta models")
 	}
 	return out, nil
 }
