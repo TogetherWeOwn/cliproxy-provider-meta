@@ -25,6 +25,8 @@ var metaStaticModels = []pluginapi.ModelInfo{
 	metaModel("muse-spark-1.2", "Muse Spark 1.2", 1788307200, 1048576, 65536),
 	metaModel("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor", 1788307200, 1048576, 65536),
 	metaModel("muse-spark-1.1", "Muse Spark 1.1", 1788307200, 1048576, 65536),
+	// Muse Ember has no Contributor-mode variant (https://dev.meta.ai/docs/muse-ember).
+	metaModel("muse-ember-1.0", "Muse Ember 1.0", 1794182400, 1048576, 524288),
 }
 
 func metaModel(id, display string, created int64, ctx, maxOut int64) pluginapi.ModelInfo {
