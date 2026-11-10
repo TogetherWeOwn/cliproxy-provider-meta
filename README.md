@@ -3,9 +3,10 @@
 Full Meta (Muse) provider plugin for stock CLIProxyAPI: auth ownership,
 namespaced models, request execution, and subscription quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-at `31d92c0` (v8.0.49 plugin ABI: answers RPC schema 10, refuses hosts older than schema 10)
-and tested with the **real CLIProxyAPI v8.0.49 C-ABI loader** (ABI 1, RPC schema 10).
-Requires CLIProxyAPI v8.0.49 or newer.
+with stock CLIProxyAPI **v8.0.59** embedded translators and the public SDK's
+`moego` replacement. Both module graphs require Go **1.26.10**. CI targets the
+**real stock v8.0.59 C-ABI loader**, including production-package startup.
+The supported host baseline is **v8.0.59**; v8.0.49 compatibility is not claimed.
 
 ## What it owns
 
@@ -50,6 +51,20 @@ fetching; errors are never cached. Windows without a usable signal drop
 from the card; a tier-only card means quota-blind, never fabricated.
 Accounts with no subscription (`is_subs_active:false`, no tier, no
 `subs_usage`) read as unknown — no windows, never fabricated headroom.
+
+## Contributor mode
+
+At the send boundary, the executor removes every spelling/value of
+`X-Tbh-Contributor-Mode`, then sets exactly one `1` only when the final
+serialized model ends in `-contributor` (case-insensitive, after trimming and
+removing the host's trailing parenthesized thinking suffix). Ordinary models
+send no opt-in header. Existing model authority is unchanged: `req.Model`
+overrides a conflicting payload model; classification does not rewrite routing.
+Retries classify their actual outgoing body again, independently of session creation.
+Raw calls opt in only for an unambiguous JSON model on POST to the resolved
+`/responses` endpoint; unknown routes, missing/duplicate models and invalid JSON
+fail closed. Transport regressions use synthetic credentials and mock responses,
+never live negative Meta probes. Source/package tests are not runtime deployment qualification.
 
 ## Credential handling
 

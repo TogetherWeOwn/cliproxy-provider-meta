@@ -178,7 +178,8 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if result, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("package: %v\n%s", err, result)
 	}
-	archive := filepath.Join(out, "meta_0.2.4_linux_amd64.zip")
+	archiveName := "meta_" + version + "_linux_amd64.zip"
+	archive := filepath.Join(out, archiveName)
 	raw, err := os.ReadFile(archive)
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +189,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(checksums), hex.EncodeToString(sum[:])+"  meta_0.2.4_linux_amd64.zip") {
+	if !strings.Contains(string(checksums), hex.EncodeToString(sum[:])+"  "+archiveName) {
 		t.Fatalf("incorrect checksums %s", checksums)
 	}
 	reader, err := zip.OpenReader(archive)
