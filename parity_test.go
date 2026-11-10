@@ -716,8 +716,8 @@ func TestParityResponsesCompactNotImplemented(t *testing.T) {
 }
 
 func TestParityModelsNamespaced(t *testing.T) {
-	provider := metaModelProvider{}
-	resp, err := provider.StaticModels(context.Background(), pluginapi.StaticModelRequest{})
+	provider := newMetaModelCatalog()
+	resp, err := provider.StaticModels(context.Background(), pluginapi.StaticModelRequest{Plugin: pluginapi.Metadata{Name: displayName}})
 	if err != nil || resp.Provider != metaMuseNamespace || len(resp.Models) == 0 {
 		t.Fatalf("static models = %+v %v", resp, err)
 	}
@@ -732,7 +732,7 @@ func TestParityModelsNamespaced(t *testing.T) {
 }
 
 func TestStaticModelsIncludeMuseEmber(t *testing.T) {
-	resp, err := metaModelProvider{}.StaticModels(context.Background(), pluginapi.StaticModelRequest{})
+	resp, err := newMetaModelCatalog().StaticModels(context.Background(), pluginapi.StaticModelRequest{Plugin: pluginapi.Metadata{Name: displayName}})
 	if err != nil {
 		t.Fatal(err)
 	}
