@@ -6,7 +6,7 @@ go 1.26.11
 replace github.com/MoeForge/moego v0.1.0-alpha.1 => github.com/router-for-me/moego v0.1.2
 
 require (
-	github.com/TogetherWeOwn/cliproxy-provider-kit v0.6.0
+	github.com/TogetherWeOwn/cliproxy-provider-kit v0.6.1
 	github.com/google/uuid v1.6.0
 	github.com/router-for-me/CLIProxyAPI/v8 v8.0.63
 	github.com/sirupsen/logrus v1.10.2
