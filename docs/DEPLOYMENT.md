@@ -58,6 +58,10 @@ process, not only the plugin being rolled back. Count
 not just for the swapped plugin. A restart rollback is a host-wide
 interruption; prefer the §1 exception (no restart) whenever it applies.
 
+> In prod a container restart cancels in-flight requests for *every*
+> provider. It is still the only rollback once the new build has loaded.
+> (Operator probe `meta-rollback-restart-20261111`, §6.)
+
 ## 3. Swap timing: first confirmed lowest in-flight reading
 
 The forward swap waits for in-flight requests on the outgoing plugin. The
@@ -66,15 +70,20 @@ whatever count the bound lands on — is retired. It once sampled a low of 3
 in-flight runs, waited out the bound, and swapped at 8, canceling 6 runs
 under a non-quiescing outgoing plugin.
 
-The rule now: **swap on the first confirmed lowest in-flight reading.**
+The rule now (host controller `ops/evidence/meta-v026-20261111/deploy.sh`
+revised with the restart-rollback probe, used as the template for all
+future per-install controllers): **swap at zero in flight, or at the
+first reading at or below the lowest seen after a 1-minute warm-up.**
 
-- Sample the in-flight basis every 15 s and log every sample.
-- Track the running minimum. Swap when the current reading is at the
-  running minimum and the following sample does not rise above it (two
-  consecutive samples at the floor), or immediately at zero in flight.
-- Never swap at a count above the running minimum, and never wait out a
-  fixed bound hoping the count improves further. A hard wall-clock cap
-  remains only as a last resort and must be logged as such when taken.
+- Sample the in-flight basis every 15 s and log every sample. The first
+  minute is a warm-up: samples establish the running minimum but do not
+  trigger the swap except at zero.
+- After the warm-up, swap on the first reading that is at or below the
+  lowest seen so far. Never swap at a count above the running minimum,
+  and never wait out a fixed bound hoping the count improves further.
+  The hard wall-clock bound is a cap only, never the trigger, and a
+  swap taken at the cap must be logged as such. Mock-tested on the
+  prior install sequence, this swaps at 3, not 8.
 - Record the swap basis in the state log: count at swap, minimum seen, and
   elapsed time.
 - Why the count matters: if the *outgoing* plugin does not implement
@@ -107,13 +116,14 @@ confirmed floor the measurement reaches, never above it.
 ## 5. Evidence: retain full model lists
 
 - In preflight, retain the **full** `/v1/models` response (every id, not
-  just the required-present check) as `models.before.json` in the evidence
-  dir. After the swap, retain the full response again as
-  `models.after.json`.
-- Diff the two lists and name every added and removed id in the install
-  record. A count delta without named ids is not evidence — it leaves the
-  change unexplained (a 575 → 572 post-install count delta with no retained
-  preflight list cannot be named, and the next install must re-derive it).
+  just the required-present check) as `models-preflight.json` in the
+  evidence dir (host controller name; do not rename to `before`/`after`).
+  After the swap, retain the full response again as `models-post.json`.
+- Diff the two lists and log every added and removed id by name in the
+  install record. A count delta without named ids is not evidence — it
+  leaves the change unexplained (a 575 → 572 post-install count delta
+  with no retained preflight list cannot be named, and the next install
+  must re-derive it).
 - Retain the in-flight sample log and the `499` count taken after the swap.
 
 ## 6. Restart-rollback isolated probe
@@ -134,6 +144,31 @@ torn down afterwards with zero containers left:
    stream result, teardown confirmation) in the probe evidence dir and
    cite it from the install card.
 
+### Probe record 2026-11-11 — `meta-rollback-restart-20261111`
+
+Operator-host evidence `ops/evidence/meta-rollback-restart-20261111/`
+(`README.md`, `rollback_probe.sh`, `out/`), all three verdicts PASS, no
+production change:
+
+- **Fresh process loaded the restored 0.2.5 bytes: PASS.** Booted on
+  0.2.5 (`6a032346…511c`), hot-swapped to 0.2.6 (`ce08d273…1c81d`),
+  restored 0.2.5 (sha verified), then `docker restart` (StartedAt
+  03:00:52Z → 03:01:05Z). After the restart the host logged
+  `plugin loaded` and `plugin registered plugin_id=meta version=0.2.5`,
+  nothing for 0.2.6.
+- **Post-restart model list and stream: PASS.** `/v1/models` identical
+  to the 0.2.5 boot list (39/39, no ids added or removed). Ember stream
+  200 with `message_stop`. 0 panics.
+- **Teardown: PASS.** 0 containers left; stage directory deleted.
+- Deviation: two Meta logins copied instead of one. The rdugger login
+  alone returned upstream 429 on 11-11. Neither login has a
+  refresh_token, so there was no rotation risk.
+
+The same rollout revised the host controller
+`ops/evidence/meta-v026-20261111/deploy.sh` (before-copy
+`deploy.sh.before-two5915`): swap timing (§3) and model-list handling
+(§5) as captured above.
+
 ## Controller functions
 
 Copy these into each per-install `deploy.sh`, parameterised by that
@@ -141,17 +176,19 @@ install's plugin id, versions, file names, and hashes. Full per-install
 scripts remain frozen evidence; this document is the living spec.
 
 ```sh
-# swap on the first confirmed lowest in-flight reading (sampled every 15 s);
-# never wait out a fixed bound, never swap above the running minimum.
+# swap at 0 in-flight, or at the first reading at or below the lowest
+# seen after a 1-minute warm-up (sampled every 15 s). The hard bound is
+# a cap only, never the trigger; mock-tested on the prior sequence
+# (swaps at 3).
 wait_low_inflight() {  # $1 = in-flight count command (plugin-scoped basis)
-  local t0 n min=999 floor=0; t0=$(date -u +%s)
+  local t0 n min=999; t0=$(date -u +%s)
   while :; do
     n=$("$1"); [ -n "$n" ] || n=999
     echo "$(date -u +%FT%TZ) in_flight=$n" >> "$SD/inflight.log"
     [ "$n" -lt "$min" ] && min=$n
     [ "$n" -eq 0 ] && break
-    if [ "$n" -le "$min" ]; then floor=$((floor + 1)); else floor=0; fi
-    [ "$floor" -ge 2 ] && break
+    # after warm-up, first reading at/below lowest seen triggers swap
+    [ $(( $(date -u +%s) - t0 )) -ge 60 ] && [ "$n" -le "$min" ] && break
     [ $(( $(date -u +%s) - t0 )) -ge 1200 ] && { log "hard cap: swapping at running minimum"; break; }
     sleep 15
   done
@@ -159,15 +196,16 @@ wait_low_inflight() {  # $1 = in-flight count command (plugin-scoped basis)
 }
 
 # retain the FULL preflight payload before any change; the post-install
-# list is written by the verify step to the same call below.
+# list is written by the verify step to the same call below. Keep these
+# filenames and log removed/added ids by name (see §5).
 capture_models() {  # $1 = output file (full response, all ids)
   probe models-all > "$1" 2>/dev/null
 }
 
 # rollback is file restore + container restart once the new build has
 # loaded; only the never-loaded case verifies without a restart (see §1).
-# A restart cancels in-flight work across ALL providers — state that
-# blast radius in every rollback plan.
+# In prod a container restart cancels in-flight requests for *every*
+# provider. It is still the only rollback once the new build has loaded.
 rollback() {
   exec 9>"$SD/rollback.lock"; flock -w 600 9 || { log "rollback lock timeout"; state rollback-FAILED; return 1; }
   grep -qx rolledback "$SD/state" 2>/dev/null && return 0
@@ -178,10 +216,10 @@ rollback() {
   if new_build_never_loaded "$RB" && version_loaded "$OLD_VERSION" "$RB" && route_ok; then
     state rolledback; log "rollback verified without restart (new build never loaded; outgoing still active)"; return 0
   fi
-  log "restarting container: this cancels in-flight work across all providers"
+  log "restarting container: in prod a container restart cancels in-flight requests for every provider"
   (cd "$S" && timeout 150 docker compose restart "$SVC") || docker restart "$C" || true
   for _ in $(seq 1 40); do sleep 3; models_ok "$REQUIRED_MODELS" >/dev/null 2>&1 && break; done
-  if version_loaded "$OLD_VERSION" "$RB" && models_match "$SD/models.before.json" "$SD/models.after.json" && stream_ok; then
+  if version_loaded "$OLD_VERSION" "$RB" && models_match "$SD/models-preflight.json" "$SD/models-post.json" && stream_ok; then
     state rolledback; log "rollback verified after restart ($OLD_VERSION loaded)"; return 0
   fi
   state rollback-FAILED; return 1
