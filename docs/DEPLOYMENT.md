@@ -81,9 +81,11 @@ first reading at or below the lowest seen after a 1-minute warm-up.**
 - After the warm-up, swap on the first reading that is at or below the
   lowest seen so far. Never swap at a count above the running minimum,
   and never wait out a fixed bound hoping the count improves further.
-  The hard wall-clock bound is a cap only, never the trigger, and a
-  swap taken at the cap must be logged as such. Mock-tested on the
-  prior install sequence, this swaps at 3, not 8.
+  The hard wall-clock bound is a cap only, never the trigger: at the
+  cap the swap is aborted if the reading is above the minimum (never
+  swap above it), and any swap decision is logged with the count at
+  swap and the minimum seen. Mock-tested on the prior install
+  sequence, this swaps at 3, not 8.
 - Record the swap basis in the state log: count at swap, minimum seen, and
   elapsed time.
 - Why the count matters: if the *outgoing* plugin does not implement
@@ -119,6 +121,11 @@ confirmed floor the measurement reaches, never above it.
   just the required-present check) as `models-preflight.json` in the
   evidence dir (host controller name; do not rename to `before`/`after`).
   After the swap, retain the full response again as `models-post.json`.
+  A restart rollback retains the post-restart list as
+  `models-post-rollback.json` and diffs it against the preflight list.
+- In preflight, record the outgoing plugin file's sha256 as `OLD_SHA`:
+  the rollback restores bytes only when they hash to it and refuses to
+  report success otherwise (§2 step 1).
 - Diff the two lists and log every added and removed id by name in the
   install record. A count delta without named ids is not evidence — it
   leaves the change unexplained (a 575 → 572 post-install count delta
@@ -181,15 +188,25 @@ scripts remain frozen evidence; this document is the living spec.
 # a cap only, never the trigger; mock-tested on the prior sequence
 # (swaps at 3).
 wait_low_inflight() {  # $1 = in-flight count command (plugin-scoped basis)
-  local t0 n min=999; t0=$(date -u +%s)
+  local t0 n min= bad=0; t0=$(date -u +%s)
   while :; do
-    n=$("$1"); [ -n "$n" ] || n=999
+    n=$("$1")
+    case "$n" in ''|*[!0-9]*)
+      bad=$((bad+1)); log "invalid in-flight sample '$n' (ignored)"
+      [ "$bad" -ge 4 ] && [ -z "$min" ] && { log "no valid in-flight count after 60s; aborting swap"; return 1; }
+      [ $(( $(date -u +%s) - t0 )) -ge 1200 ] && { log "hard cap: no valid in-flight count; aborting swap"; return 1; }
+      sleep 15; continue ;;
+    esac
+    n=$((10#$n)); bad=0
     echo "$(date -u +%FT%TZ) in_flight=$n" >> "$SD/inflight.log"
-    [ "$n" -lt "$min" ] && min=$n
+    { [ -z "$min" ] || [ "$n" -lt "$min" ]; } && min=$n
     [ "$n" -eq 0 ] && break
     # after warm-up, first reading at/below lowest seen triggers swap
     [ $(( $(date -u +%s) - t0 )) -ge 60 ] && [ "$n" -le "$min" ] && break
-    [ $(( $(date -u +%s) - t0 )) -ge 1200 ] && { log "hard cap: swapping at running minimum"; break; }
+    if [ $(( $(date -u +%s) - t0 )) -ge 1200 ]; then
+      [ "$n" -gt "$min" ] && { log "hard cap: reading $n above running minimum $min; aborting swap (never swap above the minimum)"; return 1; }
+      log "hard cap: swapping at running minimum"; break
+    fi
     sleep 15
   done
   log "swap in-flight basis: in_flight=$n (min seen $min over $(( $(date -u +%s) - t0 ))s)"
@@ -210,7 +227,9 @@ rollback() {
   exec 9>"$SD/rollback.lock"; flock -w 600 9 || { log "rollback lock timeout"; state rollback-FAILED; return 1; }
   grep -qx rolledback "$SD/state" 2>/dev/null && return 0
   state rolling-back
-  rm -f "$SO_DST"; [ -e "$SO_OLD" ] || install -m 755 "$SD/rollback.so.orig" "$SO_OLD"
+  rm -f "$SO_DST"
+  [ "$(sha "$SO_OLD" 2>/dev/null)" = "$OLD_SHA" ] || install -m 755 "$SD/rollback.so.orig" "$SO_OLD"
+  [ "$(sha "$SO_OLD")" = "$OLD_SHA" ] || { log "restored bytes do not match pre-install $OLD_SHA"; state rollback-FAILED; return 1; }
   cmp -s "$SD/config.yaml.orig" "$S/config.yaml" || cp "$SD/config.yaml.orig" "$S/config.yaml"
   log "plugin restored ($(sha "$SO_OLD"))"
   if new_build_never_loaded "$RB" && version_loaded "$OLD_VERSION" "$RB" && route_ok; then
@@ -219,7 +238,8 @@ rollback() {
   log "restarting container: in prod a container restart cancels in-flight requests for every provider"
   (cd "$S" && timeout 150 docker compose restart "$SVC") || docker restart "$C" || true
   for _ in $(seq 1 40); do sleep 3; models_ok "$REQUIRED_MODELS" >/dev/null 2>&1 && break; done
-  if version_loaded "$OLD_VERSION" "$RB" && models_match "$SD/models-preflight.json" "$SD/models-post.json" && stream_ok; then
+  capture_models "$SD/models-post-rollback.json"
+  if version_loaded "$OLD_VERSION" "$RB" && models_match "$SD/models-preflight.json" "$SD/models-post-rollback.json" && stream_ok; then
     state rolledback; log "rollback verified after restart ($OLD_VERSION loaded)"; return 0
   fi
   state rollback-FAILED; return 1
