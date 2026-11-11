@@ -184,6 +184,7 @@ func TestQuiesceDrainsInFlightExecute(t *testing.T) {
 
 	quiesceDone := make(chan pluginabi.Envelope, 1)
 	go func() { quiesceDone <- quiesceCallEnv(rt, pluginabi.MethodPluginQuiesce, nil) }()
+	waitForNotReadyQuiesce(t, rt)
 	select {
 	case env := <-quiesceDone:
 		t.Fatalf("quiesce returned while work in flight: %+v", env)
