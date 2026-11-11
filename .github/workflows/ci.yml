@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
           cache-dependency-path: |
             go.sum
             integration/hostcompat/go.sum
@@ -32,8 +32,8 @@ jobs:
           go -C integration/hostcompat mod tidy -diff
           go list -m -json all > "$TMPDIR/root-modules.json"
           go -C integration/hostcompat list -m -json all > "$TMPDIR/loader-modules.json"
-          test "$(go list -m -f '{{.Version}}' github.com/router-for-me/CLIProxyAPI/v8)" = v8.0.59
-          test "$(go -C integration/hostcompat list -m -f '{{.Version}}' github.com/router-for-me/CLIProxyAPI/v8)" = v8.0.59
+          test "$(go list -m -f '{{.Version}}' github.com/router-for-me/CLIProxyAPI/v8)" = v8.0.63
+          test "$(go -C integration/hostcompat list -m -f '{{.Version}}' github.com/router-for-me/CLIProxyAPI/v8)" = v8.0.63
           test "$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{end}}' github.com/router-for-me/CLIProxyAPI/v8)" = ''
           test "$(go -C integration/hostcompat list -m -f '{{if .Replace}}{{.Replace.Path}}{{end}}' github.com/router-for-me/CLIProxyAPI/v8)" = ''
       - name: Vet
@@ -46,7 +46,7 @@ jobs:
         run: |
           /usr/bin/python3 -I scripts/check-replay-examples.py docs/replay-event-v1.schema.json "$TMPDIR/replay-events.ndjson" "$TMPDIR/replay-failure.ndjson"
           /usr/bin/python3 -I scripts/check-replay-examples.py docs/replay-event-v1.schema.json docs/replay-events.example.ndjson
-      - name: Real stock v8.0.59 host loader compatibility
+      - name: Real stock v8.0.63 host loader compatibility
         run: go -C integration/hostcompat test -race -count=1 ./...
       - name: Production C shared library
         run: |

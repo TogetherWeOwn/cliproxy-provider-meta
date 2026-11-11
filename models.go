@@ -12,14 +12,14 @@ import (
 )
 
 // This file serves the Meta Muse catalog under the meta-muse/ namespace
-// through the kit ModelCatalog (cliproxy-provider-kit v0.5.0). The discovery
+// through the kit ModelCatalog (cliproxy-provider-kit v0.6.0). The discovery
 // source is the host's public models.json "meta" section: a new Meta model
 // becomes servable when the host catalog gains it and the host's one-shot
 // catalog-change callback re-invokes ModelsForAuth. That path covers the
 // fresh-success timeline only; a failed callback fetch keeps serving
 // last-good/static until the next host event (next catalog "meta" section
 // change, auth upsert, config reload, or plugin re-registration) — an
-// unchanged catalog poll is not a re-trigger, and v0.5.0 performs a single
+// unchanged catalog poll is not a re-trigger, and v0.6.0 performs a single
 // fetch per ModelsForAuth invocation (no bounded retry). Recovery is not
 // guaranteed; see the Timeline-B fixture in models_catalog_test.go.
 
@@ -66,7 +66,7 @@ func metaModel(id, display string, created int64, ctx, maxOut int64) pluginapi.M
 
 // metaModelsCatalogURLs are the host public catalog fetch targets, in the
 // order the host tries them (internal/registry/model_updater.go in
-// CLIProxyAPI v8.0.59).
+// CLIProxyAPI v8.0.63).
 const (
 	metaModelsCatalogPrimary  = "https://models.router-for.me/models.json"
 	metaModelsCatalogFallback = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"

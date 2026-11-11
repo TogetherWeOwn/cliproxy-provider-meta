@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
@@ -1088,7 +1089,12 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 	if len(msg) > 4096 {
 		msg = msg[:4096]
 	}
-	mapped := providerkit.MapError(&metaUpstreamError{statusCode: statusCode, message: msg})
+	mapped := providerkit.MapError(&metaUpstreamError{
+		statusCode:        statusCode,
+		message:           msg,
+		credentialScoped:  isMetaSubscriptionQuota(statusCode, body),
+		retryAfterSeconds: metaResetRetryAfterSeconds(statusCode, body, time.Now()),
+	})
 	// Surface Meta's own error token (e.g. client_attestation_denied): the kit
 	// sanitizes the mapped error to "plugin operation failed", which hides the
 	// code callers need. Only the token is ever surfaced, in a fixed-format
@@ -1112,6 +1118,54 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 		}
 	}
 	return mapped
+}
+
+// isMetaSubscriptionQuota reports whether a 429 upstream error body is an
+// account-wide quota exhaustion: the whole credential is out of quota, not
+// just one model. It mirrors stock meta_executor isMetaSubscriptionQuota: a
+// message naming the subscription quota ("subscription quota" /
+// "quota exhausted"), or a quota-shaped code ("rate_limit_exceeded" or
+// containing "quota") together with a resets_at field. The kit MapError hook
+// turns this into host-side credential cooling (the whole credential rests
+// until the reset) instead of per-model 429 failover.
+func isMetaSubscriptionQuota(statusCode int, body []byte) bool {
+	if statusCode != http.StatusTooManyRequests || len(body) == 0 {
+		return false
+	}
+	msg := strings.ToLower(metaErrorTextField(body, "message"))
+	if strings.Contains(msg, "subscription quota") || strings.Contains(msg, "quota exhausted") {
+		return true
+	}
+	code := strings.ToLower(metaErrorTextField(body, "code"))
+	if code == "rate_limit_exceeded" || strings.Contains(code, "quota") {
+		if metaUpstreamErrorField(body, "resets_at").Exists() || gjson.GetBytes(body, "resets_at").Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+// metaErrorTextField returns the first non-empty text for field across the
+// error body shapes Meta returns: error.<field>, response.error.<field> and
+// the top-level <field> (the observed 429 quota body is top-level).
+func metaErrorTextField(body []byte, field string) string {
+	if v := metaUpstreamErrorField(body, field).String(); v != "" {
+		return v
+	}
+	return gjson.GetBytes(body, field).String()
+}
+
+// metaResetRetryAfterSeconds mirrors stock parseMetaRetryAfter's status
+// gating (429/404 only) and turns an absolute reset timestamp in the body
+// into a retry-after hint in seconds relative to now (0 when none). The kit
+// helper accepts both resets_at/reset_at fields and "resets at <RFC3339>"
+// message text; a non-positive past reset yields zero so the host default
+// cooldown applies.
+func metaResetRetryAfterSeconds(statusCode int, body []byte, now time.Time) int {
+	if (statusCode != http.StatusTooManyRequests && statusCode != http.StatusNotFound) || len(body) == 0 {
+		return 0
+	}
+	return providerkit.ResetRetryAfterSeconds(body, now)
 }
 
 // metaUpstreamErrorPayload builds the passthrough error payload for a Meta
@@ -1233,9 +1287,10 @@ func isMetaErrorTokenChar(c byte) bool {
 }
 
 type metaUpstreamError struct {
-	statusCode int
-	message    string
-	retryAfter int64
+	statusCode        int
+	message           string
+	credentialScoped  bool
+	retryAfterSeconds int
 }
 
 func (e *metaUpstreamError) Error() string { return e.message }
@@ -1243,6 +1298,21 @@ func (e *metaUpstreamError) Error() string { return e.message }
 // StatusCode lets the kit preserve the upstream status (notably the 501 for
 // responses/compact) instead of collapsing every executor error to 500.
 func (e *metaUpstreamError) StatusCode() int { return e.statusCode }
+
+// CredentialScoped lets the kit map account-wide quota 429s to host-side
+// credential cooling: the whole credential rests until the reset, across
+// all models, instead of cool-only-the-reporting-model per-model 429.
+func (e *metaUpstreamError) CredentialScoped() bool { return e.credentialScoped }
+
+// RetryAfter lets the kit map the reset-time hint to
+// pluginabi.Error.RetryAfterSeconds (seconds until the quota reset).
+func (e *metaUpstreamError) RetryAfter() *time.Duration {
+	if e.retryAfterSeconds <= 0 {
+		return nil
+	}
+	d := time.Duration(e.retryAfterSeconds) * time.Second
+	return &d
+}
 
 func goosName() string {
 	switch runtime.GOOS {
