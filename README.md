@@ -139,3 +139,13 @@ replay acceptance, and do not change auth selection or replay policy.
 
 See [provenance](docs/PROVENANCE.md) for where the envelope shape and the
 request parameters come from.
+
+## Deployment
+
+The production host installs this plugin through the detached swap
+controller specified in the [deployment runbook](docs/DEPLOYMENT.md):
+hot rollback to a previously-loaded build is impossible (rollback is file
+restore + container restart), swaps land on the first confirmed lowest
+in-flight reading, and full pre- and post-install model lists are retained
+as evidence. The runbook covers every provider plugin using this
+controller, not only Meta.
