@@ -15,7 +15,7 @@ import (
 
 const (
 	displayName = "Meta"
-	version     = "0.2.6"
+	version     = "0.2.7"
 )
 
 func main() {}

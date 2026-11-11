@@ -3,10 +3,10 @@
 Full Meta (Muse) provider plugin for stock CLIProxyAPI: auth ownership,
 namespaced models, request execution, and subscription quota cards. Built on
 [`cliproxy-provider-kit`](https://github.com/TogetherWeOwn/cliproxy-provider-kit)
-with stock CLIProxyAPI **v8.0.59** embedded translators and the public SDK's
-`moego` replacement. Both module graphs require Go **1.26.10**. CI targets the
-**real stock v8.0.59 C-ABI loader**, including production-package startup.
-The supported host baseline is **v8.0.59**; v8.0.49 compatibility is not claimed.
+with stock CLIProxyAPI **v8.0.63** embedded translators and the public SDK's
+`moego` replacement. Both module graphs require Go **1.26.11**. CI targets the
+**real stock v8.0.63 C-ABI loader**, including production-package startup.
+The supported host baseline is **v8.0.63**; v8.0.49 compatibility is not claimed.
 
 ## What it owns
 

@@ -2,13 +2,13 @@
 // its import namespace; it consumes the original pinned module without a fork.
 module github.com/router-for-me/CLIProxyAPI/v8/metacompat
 
-go 1.26.10
+go 1.26.11
 
 // Match the stock SDK's public replacement; dependency replacements are not inherited.
 replace github.com/MoeForge/moego v0.1.0-alpha.1 => github.com/router-for-me/moego v0.1.2
 
 require (
-	github.com/router-for-me/CLIProxyAPI/v8 v8.0.59
+	github.com/router-for-me/CLIProxyAPI/v8 v8.0.63
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -176,10 +176,11 @@ func TestMetaCatalogExecutorMapping(t *testing.T) {
 	}
 }
 
-// The pinned v8.0.59 catalog "meta" section is the discovery fixture: 9
-// entries (no Muse Ember yet), parsed through the plugin fetch.
+// The pinned v8.0.63 catalog "meta" section is the discovery fixture: 9
+// entries (no Muse Ember yet), parsed through the plugin fetch. The v8.0.63
+// meta section is identical to v8.0.59's, so this fixture is unchanged.
 func TestMetaCatalogPinnedHostSection(t *testing.T) {
-	body, err := os.ReadFile("testdata/models-meta-v8.0.59.json")
+	body, err := os.ReadFile("testdata/models-meta-v8.0.63.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +277,7 @@ func TestMetaCatalogTimelineAFreshConverges(t *testing.T) {
 // an unchanged catalog poll is not a re-trigger. This test documents the
 // accepted residual: it asserts last-good persistence, never recovery. It
 // does not invoke ModelsForAuth again to "show" B appearing, because that
-// second invocation is exactly what the host does not guarantee. v0.5.0
+// second invocation is exactly what the host does not guarantee. v0.6.0
 // performs a single fetch per invocation (no bounded retry) — do not add
 // wait/retry claims here.
 func TestMetaCatalogTimelineBFailureThenNoGuaranteedRecovery(t *testing.T) {

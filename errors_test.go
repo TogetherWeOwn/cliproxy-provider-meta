@@ -2,11 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
+	providerkit "github.com/TogetherWeOwn/cliproxy-provider-kit"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/tidwall/gjson"
 )
@@ -216,5 +219,185 @@ func TestWrapMetaUpstreamErrorAcceptsTokenChars(t *testing.T) {
 	}
 	if want := "Meta request failed (HTTP 429: quota.exhausted-high)"; rpcErr.Message != want {
 		t.Fatalf("Message = %q, want %q", rpcErr.Message, want)
+	}
+}
+
+// TestWrapMetaUpstreamErrorQuotaTopLevelBody proves the observed account-wide
+// quota body — top-level code/message, not nested under error — maps to a
+// credential-scoped 429. Classification reads the top-level shape; the
+// sanitized-message rules are untouched, so the client still sees the generic
+// mapping rather than upstream text.
+func TestWrapMetaUpstreamErrorQuotaTopLevelBody(t *testing.T) {
+	body := []byte(`{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at 2026-11-11T02:59:37Z."}`)
+	rpcErr := unwrapMetaRPCError(t, wrapMetaUpstreamError(429, body))
+	if rpcErr.HTTPStatus != 429 {
+		t.Fatalf("HTTPStatus = %d, want 429", rpcErr.HTTPStatus)
+	}
+	if !rpcErr.CredentialScoped || !rpcErr.IsCredentialScoped() {
+		t.Fatalf("CredentialScoped = %v, want true for an account-wide quota 429", rpcErr.CredentialScoped)
+	}
+	if rpcErr.Code != "plugin_error" || rpcErr.Message != "plugin operation failed" {
+		t.Fatalf("Code/Message = %q/%q, want the sanitized fallback for a top-level body", rpcErr.Code, rpcErr.Message)
+	}
+}
+
+// TestWrapMetaUpstreamErrorQuotaNestedShape proves the nested shape (and its
+// numeric resets_at) maps to credential-scoped with a reset-time retry-after.
+func TestWrapMetaUpstreamErrorQuotaNestedShape(t *testing.T) {
+	resetsAt := time.Now().Add(time.Hour).Unix()
+	body := []byte(fmt.Sprintf(`{"error":{"code":"rate_limit_exceeded","message":"Subscription quota exhausted.","resets_at":%d}}`, resetsAt))
+	rpcErr := unwrapMetaRPCError(t, wrapMetaUpstreamError(429, body))
+	if !rpcErr.CredentialScoped {
+		t.Fatalf("CredentialScoped = false, want true for a quota 429 with resets_at")
+	}
+	if rpcErr.RetryAfterSeconds <= 0 || rpcErr.RetryAfterSeconds > 3601 {
+		t.Fatalf("RetryAfterSeconds = %d, want roughly one hour until the reset", rpcErr.RetryAfterSeconds)
+	}
+}
+
+// TestWrapMetaUpstreamErrorQuotaMessageResetCarriesSeconds proves a
+// "resets at <RFC3339>" message (no resets_at field) still yields a
+// retry-after hint on the wrapped error.
+func TestWrapMetaUpstreamErrorQuotaMessageResetCarriesSeconds(t *testing.T) {
+	reset := time.Now().Add(45 * time.Minute).UTC().Format(time.RFC3339)
+	body := []byte(fmt.Sprintf(`{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}`, reset))
+	rpcErr := unwrapMetaRPCError(t, wrapMetaUpstreamError(429, body))
+	if !rpcErr.CredentialScoped {
+		t.Fatalf("CredentialScoped = false, want true for a quota 429")
+	}
+	if rpcErr.RetryAfterSeconds <= 2690 || rpcErr.RetryAfterSeconds > 2701 {
+		t.Fatalf("RetryAfterSeconds = %d, want roughly 45 minutes until the reset", rpcErr.RetryAfterSeconds)
+	}
+}
+
+// TestWrapMetaUpstreamErrorPlain429NotScoped proves an ordinary per-model
+// rate limit (no quota phrasing, no resets_at) stays model-scoped with no
+// retry-after hint, so the host keeps its per-model 429 failover.
+func TestWrapMetaUpstreamErrorPlain429NotScoped(t *testing.T) {
+	body := []byte(`{"error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded, slow down."}}`)
+	rpcErr := unwrapMetaRPCError(t, wrapMetaUpstreamError(429, body))
+	if rpcErr.CredentialScoped {
+		t.Fatalf("CredentialScoped = true, want false for a plain 429")
+	}
+	if rpcErr.RetryAfterSeconds != 0 {
+		t.Fatalf("RetryAfterSeconds = %d, want 0 without a reset", rpcErr.RetryAfterSeconds)
+	}
+}
+
+// TestIsMetaSubscriptionQuota pins the classification arms and its gates:
+// quota phrasing in a message (any scope), or a quota-shaped code with a
+// resets_at field; non-429s never classify.
+func TestIsMetaSubscriptionQuota(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"message arm top-level", 429, `{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at 2026-11-11T02:59:37Z."}`, true},
+		{"message arm nested", 429, `{"error":{"message":"Your subscription quota is exhausted"}}`, true},
+		{"message arm response.failed", 429, `{"type":"response.failed","response":{"error":{"message":"quota exhausted"}}}`, true},
+		{"code arm nested resets_at", 429, `{"error":{"code":"rate_limit_exceeded","resets_at":1893456000}}`, true},
+		{"code arm top-level resets_at", 429, `{"code":"rate_limit_exceeded","resets_at":1893456000}`, true},
+		{"quota code without resets_at", 429, `{"error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded"}}`, false},
+		{"plain 429", 429, `{"error":{"code":"rate_limit_exceeded","message":"Too many requests"}}`, false},
+		{"non-429 with quota text", 500, `{"error":{"message":"Subscription quota exhausted"}}`, false},
+		{"404 with quota text", 404, `{"error":{"message":"Subscription quota exhausted","resets_at":1893456000}}`, false},
+		{"empty body", 429, ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isMetaSubscriptionQuota(tc.status, []byte(tc.body)); got != tc.want {
+				t.Fatalf("isMetaSubscriptionQuota(%d, %s) = %v, want %v", tc.status, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMetaResetRetryAfterSeconds pins the exact reset arithmetic with a fixed
+// now: the real incident body yields 3577s from 02:00:00Z to the 02:59:37Z
+// reset, and only 429/404 statuses read a reset at all.
+func TestMetaResetRetryAfterSeconds(t *testing.T) {
+	now := time.Date(2026, 11, 11, 2, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   int
+	}{
+		{"real incident body", 429, `{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at 2026-11-11T02:59:37Z."}`, 3577},
+		{"numeric resets_at", 429, `{"error":{"code":"rate_limit_exceeded","resets_at":1893456000}}`, int(int64(1893456000) - now.Unix())},
+		{"404 reads a reset", 404, `{"error":{"resets_at":1893456000}}`, int(int64(1893456000) - now.Unix())},
+		{"500 ignores a reset", 500, `{"error":{"resets_at":1893456000}}`, 0},
+		{"past reset", 429, `{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at 2026-11-11T01:59:37Z."}`, 0},
+		{"missing resets_at", 429, `{"error":{"message":"Rate limit exceeded"}}`, 0},
+		{"empty body", 429, ``, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := metaResetRetryAfterSeconds(tc.status, []byte(tc.body), now); got != tc.want {
+				t.Fatalf("metaResetRetryAfterSeconds(%d, %s) = %d, want %d", tc.status, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMetaStreamEventErrorQuotaCarriesPair proves stream error events carry
+// the same credential-scoped pair as the HTTP path: a numeric 429 code on an
+// error (or response.failed) event maps scoped with a retry-after, and
+// non-error events are not errors.
+func TestMetaStreamEventErrorQuotaCarriesPair(t *testing.T) {
+	reset := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+	for _, tc := range []struct{ name, event string }{
+		{"error event", fmt.Sprintf(`{"type":"error","error":{"code":429,"message":"Subscription quota exhausted. Your usage window resets at %s."}}`, reset)},
+		{"response.failed event", fmt.Sprintf(`{"type":"response.failed","response":{"error":{"code":429,"message":"quota exhausted, resets at %s"}}}`, reset)},
+		{"string-code error event", fmt.Sprintf(`{"type":"error","error":{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}}`, reset)},
+		{"string-code response.failed event", fmt.Sprintf(`{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}}}`, reset)},
+		{"top-level string-code event", fmt.Sprintf(`{"type":"error","code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}`, reset)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rpcErr := unwrapMetaRPCError(t, metaStreamEventError([]byte(tc.event)))
+			if rpcErr.HTTPStatus != 429 {
+				t.Fatalf("HTTPStatus = %d, want 429", rpcErr.HTTPStatus)
+			}
+			if !rpcErr.CredentialScoped {
+				t.Fatalf("CredentialScoped = false, want true on a quota stream error")
+			}
+			if rpcErr.RetryAfterSeconds <= 1790 || rpcErr.RetryAfterSeconds > 1801 {
+				t.Fatalf("RetryAfterSeconds = %d, want roughly 30 minutes until the reset", rpcErr.RetryAfterSeconds)
+			}
+		})
+	}
+	// A plain (non-quota) rate limit still infers 429 on the wire but must not
+	// cool the whole credential, and an unrelated string code stays 502.
+	plain := unwrapMetaRPCError(t, metaStreamEventError([]byte(`{"type":"error","error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded, slow down."}}`)))
+	if plain.HTTPStatus != 429 {
+		t.Fatalf("plain rate-limit HTTPStatus = %d, want 429", plain.HTTPStatus)
+	}
+	if plain.CredentialScoped {
+		t.Fatalf("plain rate-limit CredentialScoped = true, want false")
+	}
+	unrelated := unwrapMetaRPCError(t, metaStreamEventError([]byte(`{"type":"error","error":{"code":"client_attestation_denied","message":"bad credential"}}`)))
+	if unrelated.HTTPStatus != 502 {
+		t.Fatalf("unrelated-code HTTPStatus = %d, want 502", unrelated.HTTPStatus)
+	}
+	if err := metaStreamEventError([]byte(`{"type":"response.completed"}`)); err != nil {
+		t.Fatalf("non-error event err = %v, want nil", err)
+	}
+}
+
+// TestMapErrorKeepsScopedPairForErrorDetail proves the stream-close carrier:
+// the kit runtime sends chunk errors as error_detail through MapError, and a
+// mapped *pluginabi.Error passes through with the scoped pair intact.
+func TestMapErrorKeepsScopedPairForErrorDetail(t *testing.T) {
+	reset := time.Now().Add(20 * time.Minute).UTC().Format(time.RFC3339)
+	body := []byte(fmt.Sprintf(`{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}`, reset))
+	wrapped := unwrapMetaRPCError(t, wrapMetaUpstreamError(429, body))
+	remapped := providerkit.MapError(wrapped)
+	if !remapped.CredentialScoped {
+		t.Fatalf("remapped CredentialScoped = false, want true")
+	}
+	if remapped.RetryAfterSeconds != wrapped.RetryAfterSeconds || remapped.RetryAfterSeconds <= 1190 {
+		t.Fatalf("remapped RetryAfterSeconds = %d, want wrapped %d", remapped.RetryAfterSeconds, wrapped.RetryAfterSeconds)
 	}
 }
