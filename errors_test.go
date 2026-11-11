@@ -351,6 +351,9 @@ func TestMetaStreamEventErrorQuotaCarriesPair(t *testing.T) {
 	for _, tc := range []struct{ name, event string }{
 		{"error event", fmt.Sprintf(`{"type":"error","error":{"code":429,"message":"Subscription quota exhausted. Your usage window resets at %s."}}`, reset)},
 		{"response.failed event", fmt.Sprintf(`{"type":"response.failed","response":{"error":{"code":429,"message":"quota exhausted, resets at %s"}}}`, reset)},
+		{"string-code error event", fmt.Sprintf(`{"type":"error","error":{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}}`, reset)},
+		{"string-code response.failed event", fmt.Sprintf(`{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}}}`, reset)},
+		{"top-level string-code event", fmt.Sprintf(`{"type":"error","code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at %s."}`, reset)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rpcErr := unwrapMetaRPCError(t, metaStreamEventError([]byte(tc.event)))
@@ -364,6 +367,19 @@ func TestMetaStreamEventErrorQuotaCarriesPair(t *testing.T) {
 				t.Fatalf("RetryAfterSeconds = %d, want roughly 30 minutes until the reset", rpcErr.RetryAfterSeconds)
 			}
 		})
+	}
+	// A plain (non-quota) rate limit still infers 429 on the wire but must not
+	// cool the whole credential, and an unrelated string code stays 502.
+	plain := unwrapMetaRPCError(t, metaStreamEventError([]byte(`{"type":"error","error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded, slow down."}}`)))
+	if plain.HTTPStatus != 429 {
+		t.Fatalf("plain rate-limit HTTPStatus = %d, want 429", plain.HTTPStatus)
+	}
+	if plain.CredentialScoped {
+		t.Fatalf("plain rate-limit CredentialScoped = true, want false")
+	}
+	unrelated := unwrapMetaRPCError(t, metaStreamEventError([]byte(`{"type":"error","error":{"code":"client_attestation_denied","message":"bad credential"}}`)))
+	if unrelated.HTTPStatus != 502 {
+		t.Fatalf("unrelated-code HTTPStatus = %d, want 502", unrelated.HTTPStatus)
 	}
 	if err := metaStreamEventError([]byte(`{"type":"response.completed"}`)); err != nil {
 		t.Fatalf("non-error event err = %v, want nil", err)

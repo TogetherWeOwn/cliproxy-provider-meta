@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -1064,12 +1065,45 @@ func metaStreamEventError(eventData []byte) error {
 }
 
 // metaStreamEventStatus extracts the HTTP status a stream error event names,
-// defaulting to 502 when it names none.
+// defaulting to 502 when it names none. A 200-stream quota error names the
+// rate limit with a string code ("rate_limit_exceeded") instead of a numeric
+// status — the shape the observed quota body uses — so quota-shaped codes and
+// quota-phrasing messages infer 429; without that, isMetaSubscriptionQuota
+// never fires on stream errors and an exhausted account keeps being retried
+// through the chunk-error path. Credential scope itself stays gated by
+// isMetaSubscriptionQuota, so a plain (non-quota) rate limit infers 429
+// without cooling the whole credential.
 func metaStreamEventStatus(eventData []byte) int {
-	if code := int(metaUpstreamErrorField(eventData, "code").Int()); code >= 400 && code <= 599 {
+	if code := metaStreamEventNumericCode(eventData); code >= 400 && code <= 599 {
 		return code
 	}
+	code := strings.ToLower(metaErrorTextField(eventData, "code"))
+	if strings.Contains(code, "rate_limit") || strings.Contains(code, "quota") {
+		return http.StatusTooManyRequests
+	}
+	msg := strings.ToLower(metaErrorTextField(eventData, "message"))
+	if strings.Contains(msg, "subscription quota") || strings.Contains(msg, "quota exhausted") {
+		return http.StatusTooManyRequests
+	}
 	return http.StatusBadGateway
+}
+
+// metaStreamEventNumericCode reads a numeric status code from any error body
+// shape (error.code, response.error.code, top-level code), including a
+// stringified number; 0 when none is present.
+func metaStreamEventNumericCode(eventData []byte) int {
+	for _, r := range []gjson.Result{
+		metaUpstreamErrorField(eventData, "code"),
+		gjson.GetBytes(eventData, "code"),
+	} {
+		if code := int(r.Int()); code >= 400 && code <= 599 {
+			return code
+		}
+		if code, err := strconv.Atoi(strings.TrimSpace(r.String())); err == nil && code >= 400 && code <= 599 {
+			return code
+		}
+	}
+	return 0
 }
 
 // metaStreamEventMessage extracts the message a stream error event carries for
