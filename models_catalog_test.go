@@ -277,7 +277,7 @@ func TestMetaCatalogTimelineAFreshConverges(t *testing.T) {
 // an unchanged catalog poll is not a re-trigger. This test documents the
 // accepted residual: it asserts last-good persistence, never recovery. It
 // does not invoke ModelsForAuth again to "show" B appearing, because that
-// second invocation is exactly what the host does not guarantee. v0.6.0
+// second invocation is exactly what the host does not guarantee. v0.6.1
 // performs a single fetch per invocation (no bounded retry) — do not add
 // wait/retry claims here.
 func TestMetaCatalogTimelineBFailureThenNoGuaranteedRecovery(t *testing.T) {

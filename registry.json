@@ -7,7 +7,7 @@
       "description": "Meta Muse provider: auth ownership with legacy meta takeover, namespaced models, patch-carrying executor, and subscription quota cards",
       "author": "TogetherWeOwn",
       "repository": "https://github.com/TogetherWeOwn/cliproxy-provider-meta",
-      "version": "0.2.7",
+      "version": "0.2.8",
       "license": "MIT",
       "tags": ["provider", "meta", "quota", "executor"],
       "install": {"type": "github-release"}
