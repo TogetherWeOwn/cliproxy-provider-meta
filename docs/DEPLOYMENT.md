@@ -193,7 +193,7 @@ wait_low_inflight() {  # $1 = in-flight count command (plugin-scoped basis)
     n=$("$1")
     case "$n" in ''|*[!0-9]*)
       bad=$((bad+1)); log "invalid in-flight sample '$n' (ignored)"
-      [ "$bad" -ge 4 ] && [ -z "$min" ] && { log "no valid in-flight count after 60s; aborting swap"; return 1; }
+      [ "$bad" -ge 4 ] && [ -z "$min" ] && [ $(( $(date -u +%s) - t0 )) -ge 60 ] && { log "no valid in-flight count after 60s; aborting swap"; return 1; }
       [ $(( $(date -u +%s) - t0 )) -ge 1200 ] && { log "hard cap: no valid in-flight count; aborting swap"; return 1; }
       sleep 15; continue ;;
     esac
@@ -205,7 +205,7 @@ wait_low_inflight() {  # $1 = in-flight count command (plugin-scoped basis)
     [ $(( $(date -u +%s) - t0 )) -ge 60 ] && [ "$n" -le "$min" ] && break
     if [ $(( $(date -u +%s) - t0 )) -ge 1200 ]; then
       [ "$n" -gt "$min" ] && { log "hard cap: reading $n above running minimum $min; aborting swap (never swap above the minimum)"; return 1; }
-      log "hard cap: swapping at running minimum"; break
+      break
     fi
     sleep 15
   done
