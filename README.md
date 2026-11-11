@@ -38,7 +38,9 @@ The supported host baseline is **v8.0.59**; v8.0.49 compatibility is not claimed
   `/responses`. It carries the four Meta fork patches so they can be dropped
   from the fork: account-bound reasoning replay with a one-shot retry,
   per-session `prompt_cache_key`, the fail-closed reasoning sanitizer, and
-  stream bootstrap peek with `response.subscription_usage` filtering.
+  stream bootstrap peek with `response.subscription_usage` filtering. Hot
+  plugin swaps quiesce by draining these in-flight requests instead of
+  canceling them.
 - **Quota** (`quota.go`, `quota_provider.go`, `subscription.go`): converging
   subscription quota cards for both `meta` and `meta-muse` keys, fed passively
   by usage events the executor observes on inference traffic (plus the
