@@ -1,0 +1,56 @@
+# Highest matching tier wins; sensitive wins overlaps. Unmatched paths are sensitive.
+# Low tests are additive-only: deleted tests/snapshots, weakened assertions or
+# lowered gates are sensitive. Content overrides every path: new/changed public
+# endpoints or input parsing, auth/authz/session, crypto/keys, credentials/secrets,
+# permissions, tenant isolation, personal data, SQL/schema/migrations,
+# dependencies/lockfiles (including dev dependencies), and CI are sensitive.
+# QA reviews every change; Security reviews sensitive or unclassified changes
+# and content-triggered or QA-escalated changes, before QA. This map does not
+# install or activate enforcement. Downgrading a sensitive floor needs Security.
+version: 1
+default_tier: sensitive
+tiers:
+  low:
+    # Static public model catalog fixture; executable fixtures are excluded.
+    - 'testdata/models-meta-v8.0.63.json'
+    # No test files are allowlisted: their security assertions need review.
+  ordinary: []
+  sensitive:
+    - '.github/**'
+    - 'CODEOWNERS'
+    - '**/CODEOWNERS'
+    - 'AGENTS.md'
+    - '**/AGENTS.md'
+    - 'CLAUDE.md'
+    - '**/CLAUDE.md'
+    - '.claude/**'
+    - '**/skills/**'
+    - 'go.mod'
+    - 'go.sum'
+    - '**/go.mod'
+    - '**/go.sum'
+    - 'Makefile'
+    - '**/Makefile'
+    - 'Dockerfile'
+    - '**/Dockerfile*'
+    - 'scripts/**'
+    - 'integration/**'
+    - 'docs/**'
+    - 'README.md'
+    - 'registry.json'
+    - 'auth.go'
+    - 'base*.go'
+    - 'config.go'
+    - 'errors.go'
+    - 'executor.go'
+    - 'main.go'
+    - 'models.go'
+    - 'prefilter.go'
+    - 'promptcachekey.go'
+    - 'quota*.go'
+    - 'replay*.go'
+    - 'sanitize.go'
+    - 'security_test.go'
+    - 'signature.go'
+    - 'subscription.go'
+    - 'tools.go'
