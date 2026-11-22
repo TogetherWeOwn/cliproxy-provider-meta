@@ -51,7 +51,10 @@ nm -D "$scratch/meta.so" > "$scratch/symbols.txt"
 grep -q ' T cliproxy_plugin_init$' "$scratch/symbols.txt"
 archive="meta_${version}_linux_amd64.zip"
 # Exclude generated C headers and any credential/config files from the archive.
-zip -q -X -j "$scratch/$archive" "$scratch/meta.so" "$root/LICENSE"
+install -m 0644 "$root/LICENSE" "$scratch/LICENSE"
+chmod 0755 "$scratch/meta.so"
+TZ=UTC touch -t 198001010000 "$scratch/meta.so" "$scratch/LICENSE"
+TZ=UTC zip -q -X -j "$scratch/$archive" "$scratch/meta.so" "$scratch/LICENSE"
 (cd -- "$scratch" && sha256sum "$archive") > "$scratch/checksums.txt"
 python3 -I - "$scratch" "$archive" "$revision" "$tree" "$modified" "$version" "$root/docs/replay-event-v1.schema.json" <<'PY'
 import hashlib, json, pathlib, sys
