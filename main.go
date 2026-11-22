@@ -15,7 +15,7 @@ import (
 
 const (
 	displayName = "Meta"
-	version     = "0.2.8"
+	version     = "0.2.9"
 )
 
 func main() {}
@@ -41,9 +41,10 @@ func makePlugin(host kit.Caller) (*kit.Runtime, error) {
 	}
 	executor.evidence = producer
 	return kit.New(kit.Definition{
-		Metadata:       pluginapi.Metadata{Name: displayName, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-meta", Logo: "https://www.google.com/s2/favicons?domain=meta.ai"},
-		ModelNamespace: metaMuseNamespace,
-		Configure:      configureBase,
+		Metadata:         pluginapi.Metadata{Name: displayName, Version: version, Author: "TogetherWeOwn", GitHubRepository: "https://github.com/TogetherWeOwn/cliproxy-provider-meta", Logo: "https://www.google.com/s2/favicons?domain=meta.ai"},
+		ModelNamespace:   metaMuseNamespace,
+		Configure:        configureBase,
+		ConfigEquivalent: pluginConfigEquivalent,
 		Capabilities: pluginapi.Capabilities{
 			AuthProvider:          auth,
 			ModelRegistrar:        models,

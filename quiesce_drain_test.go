@@ -31,6 +31,8 @@ import (
 // SSE stream read-by-read, with every read after the first gated, so the
 // stream (peek, then pump) can be held in flight across quiesce.
 type quiesceHost struct {
+	streamClosed chan struct{}
+
 	enterOnce sync.Once
 	entered   chan struct{}
 	DoGate    chan struct{} // closed by the test to release the sync Do
@@ -43,6 +45,8 @@ type quiesceHost struct {
 
 func newQuiesceHost() *quiesceHost {
 	return &quiesceHost{
+		streamClosed: make(chan struct{}),
+
 		entered:  make(chan struct{}),
 		DoGate:   make(chan struct{}),
 		readGate: make(chan struct{}),
@@ -103,6 +107,9 @@ func (h *quiesceHost) Call(ctx context.Context, method string, raw []byte) ([]by
 	case pluginabi.MethodHostStreamClose:
 		h.mu.Lock()
 		h.closes++
+		if h.closes == 1 {
+			close(h.streamClosed)
+		}
 		h.mu.Unlock()
 		return quiesceOKResult(map[string]any{}), nil
 	default:

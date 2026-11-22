@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"reflect"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -89,10 +93,181 @@ type pluginConfig struct {
 }
 
 func parsePluginConfig(raw []byte) pluginConfig {
-	var cfg pluginConfig
-	if len(raw) == 0 {
-		return cfg
+	var doc yaml.Node
+	if yaml.NewDecoder(bytes.NewReader(raw)).Decode(&doc) != nil {
+		return pluginConfig{}
 	}
-	_ = yaml.Unmarshal(raw, &cfg)
+	cfg, _ := decodePluginConfig(&doc)
 	return cfg
+}
+
+func decodePluginConfig(doc *yaml.Node) (pluginConfig, error) {
+	var cfg pluginConfig
+	// Keep any partially decoded settings for the ordinary Configure path.
+	err := doc.Decode(&cfg)
+	return cfg, err
+}
+
+type effectivePluginConfig struct {
+	pluginConfig
+	enabled  bool
+	priority int
+	store    *pluginstore.Manifest
+}
+
+func pluginConfigEquivalent(previous, proposed []byte) bool {
+	left, valid := validatedPluginConfig(previous)
+	if !valid {
+		return false
+	}
+	right, valid := validatedPluginConfig(proposed)
+	return valid && reflect.DeepEqual(left, right)
+}
+
+func validatedPluginConfig(raw []byte) (effectivePluginConfig, bool) {
+	var effective effectivePluginConfig
+	// Bound the work done by the optional comparison during reconfigure.
+	if len(raw) > 64*1024 {
+		return effective, false
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	var doc, extra yaml.Node
+	err := decoder.Decode(&doc)
+	if err == io.EOF {
+		return effective, true
+	}
+	if err != nil || decoder.Decode(&extra) != io.EOF {
+		return effective, false
+	}
+	// Reject aliases and duplicate keys before typed decoding can expand them.
+	remaining := 4096
+	if !boundedConfigYAML(&doc, 0, &remaining) {
+		return effective, false
+	}
+	cfg, err := decodePluginConfig(&doc)
+	if err != nil {
+		return effective, false
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode || root.Tag != "!!map" {
+		return effective, false
+	}
+	for i := 0; i < len(root.Content); i += 2 {
+		key, value := root.Content[i], root.Content[i+1]
+		switch key.Value {
+		case "enabled":
+			if value.Tag != "!!bool" || value.Decode(&effective.enabled) != nil {
+				return effective, false
+			}
+		case "priority":
+			if value.Tag != "!!int" || value.Decode(&effective.priority) != nil {
+				return effective, false
+			}
+		case "reasoning-replay":
+			if !validReplayConfig(value) {
+				return effective, false
+			}
+		case "store":
+			effective.store = validatedStoreManifest(value)
+			if effective.store == nil {
+				return effective, false
+			}
+		default:
+			return effective, false
+		}
+	}
+	if len(cfg.ReasoningReplay.Models) == 0 {
+		cfg.ReasoningReplay.Models = nil
+	}
+	effective.pluginConfig = cfg
+	return effective, true
+}
+
+func boundedConfigYAML(node *yaml.Node, depth int, remaining *int) bool {
+	if node.Kind == yaml.AliasNode || depth == 16 || *remaining == 0 {
+		return false
+	}
+	*remaining -= 1
+	if node.Kind == yaml.MappingNode {
+		keys := make(map[string]struct{}, len(node.Content)/2)
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i]
+			if _, duplicate := keys[key.Value]; duplicate || key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return false
+			}
+			keys[key.Value] = struct{}{}
+		}
+	}
+	for _, child := range node.Content {
+		if !boundedConfigYAML(child, depth+1, remaining) {
+			return false
+		}
+	}
+	return true
+}
+
+func validReplayConfig(node *yaml.Node) bool {
+	if node.Kind != yaml.MappingNode || node.Tag != "!!map" {
+		return false
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		switch key.Value {
+		case "enabled":
+			if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
+				return false
+			}
+		case "models":
+			if value.Kind != yaml.SequenceNode || value.Tag != "!!seq" {
+				return false
+			}
+			for _, model := range value.Content {
+				if model.Kind != yaml.ScalarNode || model.Tag != "!!str" {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validatedStoreManifest(node *yaml.Node) *pluginstore.Manifest {
+	var manifest pluginstore.Manifest
+	if node.Decode(&manifest) != nil || manifest.Validate() != nil {
+		return nil
+	}
+	// The host writes this same SDK type as YAML. Checking its encoded shape
+	// excludes unknown fields and scalar coercions during decoding.
+	var canonical yaml.Node
+	if canonical.Encode(manifest) != nil || !matchesYAMLShape(node, &canonical) {
+		return nil
+	}
+	return &manifest
+}
+
+func matchesYAMLShape(node, canonical *yaml.Node) bool {
+	if node.Kind != canonical.Kind || node.Tag != canonical.Tag || len(node.Content) != len(canonical.Content) {
+		return false
+	}
+	if node.Kind == yaml.MappingNode {
+		fields := make(map[string]*yaml.Node, len(canonical.Content)/2)
+		for i := 0; i < len(canonical.Content); i += 2 {
+			fields[canonical.Content[i].Value] = canonical.Content[i+1]
+		}
+		for i := 0; i < len(node.Content); i += 2 {
+			value := fields[node.Content[i].Value]
+			if value == nil || !matchesYAMLShape(node.Content[i+1], value) {
+				return false
+			}
+		}
+		return true
+	}
+	for i, child := range node.Content {
+		if !matchesYAMLShape(child, canonical.Content[i]) {
+			return false
+		}
+	}
+	return true
 }
