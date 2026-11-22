@@ -65,6 +65,17 @@ func TestConfigurePreservesPermissiveDecode(t *testing.T) {
 	}
 }
 
+func TestPluginConfigComparisonBounds(t *testing.T) {
+	aliasedStore := strings.Replace(storeManifest, "[provider, meta]", "[&tag "+strings.Repeat("x", 1024)+strings.Repeat(", *tag", 64)+"]", 1)
+	raw := []byte(replayFlowConfig + aliasedStore)
+	if allocations := testing.AllocsPerRun(5, func() { _, _ = validatedPluginConfig(raw) }); allocations > 1000 {
+		t.Fatalf("comparing aliased YAML allocated %.0f times", allocations)
+	}
+	if _, valid := validatedPluginConfig(raw); valid {
+		t.Fatal("aliased store manifest was accepted")
+	}
+}
+
 func TestConfigEquivalentKeepsActiveMetaStream(t *testing.T) {
 	host := newQuiesceHost()
 	rt, err := makePlugin(host)

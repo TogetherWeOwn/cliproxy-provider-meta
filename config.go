@@ -93,19 +93,19 @@ type pluginConfig struct {
 }
 
 func parsePluginConfig(raw []byte) pluginConfig {
-	cfg, _, _ := decodePluginConfig(yaml.NewDecoder(bytes.NewReader(raw)))
+	var doc yaml.Node
+	if yaml.NewDecoder(bytes.NewReader(raw)).Decode(&doc) != nil {
+		return pluginConfig{}
+	}
+	cfg, _ := decodePluginConfig(&doc)
 	return cfg
 }
 
-func decodePluginConfig(decoder *yaml.Decoder) (pluginConfig, yaml.Node, error) {
+func decodePluginConfig(doc *yaml.Node) (pluginConfig, error) {
 	var cfg pluginConfig
-	var doc yaml.Node
-	if err := decoder.Decode(&doc); err != nil {
-		return cfg, doc, err
-	}
 	// Keep any partially decoded settings for the ordinary Configure path.
 	err := doc.Decode(&cfg)
-	return cfg, doc, err
+	return cfg, err
 }
 
 type effectivePluginConfig struct {
@@ -131,12 +131,22 @@ func validatedPluginConfig(raw []byte) (effectivePluginConfig, bool) {
 		return effective, false
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(raw))
-	cfg, doc, err := decodePluginConfig(decoder)
+	var doc, extra yaml.Node
+	err := decoder.Decode(&doc)
 	if err == io.EOF {
 		return effective, true
 	}
-	var extra yaml.Node
 	if err != nil || decoder.Decode(&extra) != io.EOF {
+		return effective, false
+	}
+	// Reject aliases before decoding any values, and cap the tree size before
+	// invoking the decoder's duplicate-key checks.
+	remaining := 4096
+	if !boundedConfigYAML(&doc, 0, &remaining) {
+		return effective, false
+	}
+	cfg, err := decodePluginConfig(&doc)
+	if err != nil {
 		return effective, false
 	}
 	root := doc.Content[0]
@@ -175,6 +185,19 @@ func validatedPluginConfig(raw []byte) (effectivePluginConfig, bool) {
 	}
 	effective.pluginConfig = cfg
 	return effective, true
+}
+
+func boundedConfigYAML(node *yaml.Node, depth int, remaining *int) bool {
+	if node.Kind == yaml.AliasNode || depth == 16 || *remaining == 0 {
+		return false
+	}
+	*remaining -= 1
+	for _, child := range node.Content {
+		if !boundedConfigYAML(child, depth+1, remaining) {
+			return false
+		}
+	}
+	return true
 }
 
 func validReplayConfig(node *yaml.Node) bool {

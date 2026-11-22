@@ -237,6 +237,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 		if !known || f.Mode() != mode || !f.Modified.Equal(epoch) {
 			t.Fatalf("unexpected archive member metadata for %q: %v, %v", f.Name, f.Mode(), f.Modified)
 		}
+		delete(archiveModes, f.Name)
 		if f.Name == "meta.so" && f.UncompressedSize64 > 0 {
 			found = true
 			lib, err := f.Open()
@@ -266,7 +267,7 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 			t.Fatalf("unexpected archive entry %q", f.Name)
 		}
 	}
-	if !found {
-		t.Fatal("archive lacks meta.so")
+	if !found || len(archiveModes) != 0 {
+		t.Fatal("archive must contain a nonempty meta.so and the license")
 	}
 }
