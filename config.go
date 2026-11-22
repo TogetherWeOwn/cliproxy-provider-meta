@@ -139,8 +139,7 @@ func validatedPluginConfig(raw []byte) (effectivePluginConfig, bool) {
 	if err != nil || decoder.Decode(&extra) != io.EOF {
 		return effective, false
 	}
-	// Reject aliases before decoding any values, and cap the tree size before
-	// invoking the decoder's duplicate-key checks.
+	// Reject aliases and duplicate keys before typed decoding can expand them.
 	remaining := 4096
 	if !boundedConfigYAML(&doc, 0, &remaining) {
 		return effective, false
@@ -155,9 +154,6 @@ func validatedPluginConfig(raw []byte) (effectivePluginConfig, bool) {
 	}
 	for i := 0; i < len(root.Content); i += 2 {
 		key, value := root.Content[i], root.Content[i+1]
-		if key.Tag != "!!str" {
-			return effective, false
-		}
 		switch key.Value {
 		case "enabled":
 			if value.Tag != "!!bool" || value.Decode(&effective.enabled) != nil {
@@ -192,6 +188,16 @@ func boundedConfigYAML(node *yaml.Node, depth int, remaining *int) bool {
 		return false
 	}
 	*remaining -= 1
+	if node.Kind == yaml.MappingNode {
+		keys := make(map[string]struct{}, len(node.Content)/2)
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i]
+			if _, duplicate := keys[key.Value]; duplicate || key.Kind != yaml.ScalarNode || key.Tag != "!!str" {
+				return false
+			}
+			keys[key.Value] = struct{}{}
+		}
+	}
 	for _, child := range node.Content {
 		if !boundedConfigYAML(child, depth+1, remaining) {
 			return false
@@ -206,9 +212,6 @@ func validReplayConfig(node *yaml.Node) bool {
 	}
 	for i := 0; i < len(node.Content); i += 2 {
 		key, value := node.Content[i], node.Content[i+1]
-		if key.Tag != "!!str" {
-			return false
-		}
 		switch key.Value {
 		case "enabled":
 			if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
@@ -236,7 +239,7 @@ func validatedStoreManifest(node *yaml.Node) *pluginstore.Manifest {
 		return nil
 	}
 	// The host writes this same SDK type as YAML. Checking its encoded shape
-	// excludes unknown fields, aliases and scalar coercions during decoding.
+	// excludes unknown fields and scalar coercions during decoding.
 	var canonical yaml.Node
 	if canonical.Encode(manifest) != nil || !matchesYAMLShape(node, &canonical) {
 		return nil
@@ -254,12 +257,10 @@ func matchesYAMLShape(node, canonical *yaml.Node) bool {
 			fields[canonical.Content[i].Value] = canonical.Content[i+1]
 		}
 		for i := 0; i < len(node.Content); i += 2 {
-			key := node.Content[i]
-			value := fields[key.Value]
-			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || value == nil || !matchesYAMLShape(node.Content[i+1], value) {
+			value := fields[node.Content[i].Value]
+			if value == nil || !matchesYAMLShape(node.Content[i+1], value) {
 				return false
 			}
-			delete(fields, key.Value)
 		}
 		return true
 	}
