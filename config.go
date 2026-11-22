@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -111,6 +112,7 @@ type effectivePluginConfig struct {
 	pluginConfig
 	enabled  bool
 	priority int
+	store    *pluginstore.Manifest
 }
 
 func pluginConfigEquivalent(previous, proposed []byte) bool {
@@ -159,6 +161,11 @@ func validatedPluginConfig(raw []byte) (effectivePluginConfig, bool) {
 			if !validReplayConfig(value) {
 				return effective, false
 			}
+		case "store":
+			effective.store = validatedStoreManifest(value)
+			if effective.store == nil {
+				return effective, false
+			}
 		default:
 			return effective, false
 		}
@@ -194,6 +201,47 @@ func validReplayConfig(node *yaml.Node) bool {
 				}
 			}
 		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validatedStoreManifest(node *yaml.Node) *pluginstore.Manifest {
+	var manifest pluginstore.Manifest
+	if node.Decode(&manifest) != nil || manifest.Validate() != nil {
+		return nil
+	}
+	// The host writes this same SDK type as YAML. Checking its encoded shape
+	// excludes unknown fields, aliases and scalar coercions during decoding.
+	var canonical yaml.Node
+	if canonical.Encode(manifest) != nil || !matchesYAMLShape(node, &canonical) {
+		return nil
+	}
+	return &manifest
+}
+
+func matchesYAMLShape(node, canonical *yaml.Node) bool {
+	if node.Kind != canonical.Kind || node.Tag != canonical.Tag || len(node.Content) != len(canonical.Content) {
+		return false
+	}
+	if node.Kind == yaml.MappingNode {
+		fields := make(map[string]*yaml.Node, len(canonical.Content)/2)
+		for i := 0; i < len(canonical.Content); i += 2 {
+			fields[canonical.Content[i].Value] = canonical.Content[i+1]
+		}
+		for i := 0; i < len(node.Content); i += 2 {
+			key := node.Content[i]
+			value := fields[key.Value]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || value == nil || !matchesYAMLShape(node.Content[i+1], value) {
+				return false
+			}
+			delete(fields, key.Value)
+		}
+		return true
+	}
+	for i, child := range node.Content {
+		if !matchesYAMLShape(child, canonical.Content[i]) {
 			return false
 		}
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -184,6 +185,15 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rebuild := t.TempDir()
+	cmd = exec.Command("bash", filepath.Join(linkedRoot, "scripts/package-release.sh"), rebuild)
+	cmd.Env = append(os.Environ(), "TZ=Pacific/Honolulu")
+	if result, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("rebuild: %v\n%s", err, result)
+	}
+	if rebuilt, err := os.ReadFile(filepath.Join(rebuild, archiveName)); err != nil || !bytes.Equal(raw, rebuilt) {
+		t.Fatalf("package rebuild must produce identical archive bytes: %v", err)
+	}
 	sum := sha256.Sum256(raw)
 	checksums, err := os.ReadFile(filepath.Join(out, "checksums.txt"))
 	if err != nil {
@@ -220,7 +230,13 @@ func TestReleaseArchiveAndChecksums(t *testing.T) {
 		t.Fatal("provenance archive digest mismatch")
 	}
 	found := false
+	archiveModes := map[string]os.FileMode{"meta.so": 0755, "LICENSE": 0644}
 	for _, f := range reader.File {
+		mode, known := archiveModes[f.Name]
+		epoch := time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
+		if !known || f.Mode() != mode || !f.Modified.Equal(epoch) {
+			t.Fatalf("unexpected archive member metadata for %q: %v, %v", f.Name, f.Mode(), f.Modified)
+		}
 		if f.Name == "meta.so" && f.UncompressedSize64 > 0 {
 			found = true
 			lib, err := f.Open()

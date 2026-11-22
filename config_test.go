@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 const replayFlowConfig = "enabled: true\npriority: 0\nreasoning-replay: {enabled: true, models: [spark, wonder]}\n"
 const replayBlockConfig = "# unchanged replay selectors\nreasoning-replay:\n  models:\n    - spark\n    - 'wonder'\n  enabled: true\nenabled: true\n"
+const storeManifest = "store: {id: meta, name: Meta, author: TogetherWeOwn, description: 'Meta Muse', version: 0.2.9, release-tag: v0.2.9, repository: 'https://github.com/TogetherWeOwn/cliproxy-provider-meta', tags: [provider, meta], install: {type: github-release}}\n"
 
 func TestPluginConfigEquivalent(t *testing.T) {
 	for _, tc := range []struct {
@@ -38,6 +40,10 @@ func TestPluginConfigEquivalent(t *testing.T) {
 		{"partially decoded sequence", replayFlowConfig, "enabled: true\nreasoning-replay: {enabled: true, models: [spark, null, wonder]}", false},
 		{"coerced selector", "reasoning-replay: {models: ['42']}", "reasoning-replay: {models: [42]}", false},
 		{"alias", "reasoning-replay: {models: [spark, spark]}", "reasoning-replay: {models: [&model spark, *model]}", false},
+		{"stock store manifest", replayFlowConfig + storeManifest, storeManifest + replayBlockConfig, true},
+		{"changed store version", replayFlowConfig + storeManifest, replayBlockConfig + strings.ReplaceAll(storeManifest, "0.2.9", "0.2.8"), false},
+		{"unknown store field", replayFlowConfig + storeManifest, replayBlockConfig + strings.Replace(storeManifest, "id: meta", "id: meta, unknown: true", 1), false},
+		{"coerced store field", replayFlowConfig + strings.Replace(storeManifest, "name: Meta", "name: '42'", 1), replayBlockConfig + strings.Replace(storeManifest, "name: Meta", "name: 42", 1), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			left, right := []byte(tc.previous), []byte(tc.proposed)
@@ -79,7 +85,7 @@ func TestConfigEquivalentKeepsActiveMetaStream(t *testing.T) {
 	apply := func(method, raw string) pluginabi.Envelope {
 		return quiesceCallEnv(rt, method, map[string]any{"schema_version": pluginabi.SchemaVersion, "config_yaml": []byte(raw)})
 	}
-	if env := apply(pluginabi.MethodPluginRegister, replayFlowConfig); !env.OK {
+	if env := apply(pluginabi.MethodPluginRegister, replayFlowConfig+storeManifest); !env.OK {
 		t.Fatalf("register: %+v", env.Error)
 	}
 
@@ -93,7 +99,7 @@ func TestConfigEquivalentKeepsActiveMetaStream(t *testing.T) {
 		t.Fatal("stream never reached upstream")
 	}
 	reconfigured := make(chan pluginabi.Envelope, 1)
-	go func() { reconfigured <- apply(pluginabi.MethodPluginReconfigure, replayBlockConfig) }()
+	go func() { reconfigured <- apply(pluginabi.MethodPluginReconfigure, replayBlockConfig+storeManifest) }()
 	select {
 	case env := <-reconfigured:
 		if !env.OK {
@@ -122,7 +128,7 @@ func TestConfigEquivalentKeepsActiveMetaStream(t *testing.T) {
 	if closes != 1 || !bytes.Contains(payload, []byte("pong")) || !bytes.Contains(payload, []byte("message_stop")) {
 		t.Fatalf("active stream missed content or terminal: closes=%d, payload=%s", closes, payload)
 	}
-	if env := apply(pluginabi.MethodPluginReconfigure, "enabled: true\nreasoning-replay: {enabled: false, models: [other]}"); !env.OK {
+	if env := apply(pluginabi.MethodPluginReconfigure, "enabled: true\nreasoning-replay: {enabled: false, models: [other]}\n"+storeManifest); !env.OK {
 		t.Fatalf("effective change: %+v", env.Error)
 	}
 	if cfg := pluginConfigNow().ReasoningReplay; cfg.Enabled || !slices.Equal(cfg.Models, []string{"other"}) {
